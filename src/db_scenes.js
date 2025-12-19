@@ -339,22 +339,24 @@ first_death_after_work: {
   tension: 0.55,
 
   backgroundLayers: (state) => ({
-  bg: "apartment_bg",
+  bg: "tv_bg",
   light: "tv_light",
   glow: "tv_glow",
 
+  // ✅ draw your “slanted TV screen overlay” as SCREEN layer, not FG
   screen: tvNewsKey(state),
   screenX: 0.23,
   screenY: 0.62,
   screenScale: 0.34,
   screenRot: -0.035,
+  screenBlend: "SCREEN",
+  screenAlpha: 0.95,
 
+  // ✅ this should be the full-scene foreground (room edges etc)
   fg: "tv_fg",
-  fgX: 0.23,
-  fgY: 0.62,
-  fgScale: 0.34,
-  fgRot: -0.035,
-  lockFg: true,
+
+  // ✅ IMPORTANT: don’t drift the TV scene background
+  disableDrift: true,
 }),
 
   text: (state) => {
@@ -1166,6 +1168,7 @@ connect_the_dots: {
       ];
     }
     return [
+      { label: "Back", go: "intro_morning" },
       { label: "Return downtown", go: "downtown_arrival" },
       { label: "Check public records", go: "public_records" },
       { label: "Go to the statehouse bar", go: "staffer_bar" },
