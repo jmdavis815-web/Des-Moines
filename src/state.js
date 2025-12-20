@@ -50,6 +50,24 @@ export function makeNewState() {
       apartment_safe: true,
       news_looping: false,
 
+      // progression
+  first_death_seen: false,
+  loop_awareness: false,
+
+   // mirror system
+  mirror_stare_count: 0,
+  mirror_wrong_hits: 0,
+  mirrorVariant: "normal",
+  mirror_demon_started: false,
+
+  // PC
+  pc_visits: 0,
+  pc_archive_found: false,
+
+  // evidence
+  evidence_count: 0,
+  ev_work_pc_archive: false,
+
       // optional progression gates
       unlocked_map: false,
       unlock_downtown: true,       // downtown available by default

@@ -1411,6 +1411,15 @@ if (t != null) {
 // Avoid piling up volume tweens if you click quickly
 this.tweens.killTweensOf(this.ambient);
 
+// --- SANITY INFLUENCE (global) ---
+// sanity low = stronger ambience + more pressure
+const san = Number.isFinite(state.sanity) ? state.sanity : 10;
+const maxSan = Number.isFinite(state.maxSanity) ? state.maxSanity : 10;
+const sanRatio = maxSan > 0 ? san / maxSan : 1;
+
+// push intensity up as sanity drops (0.0 -> +0.25)
+intensity = Math.min(1, Math.max(0, intensity + (1 - sanRatio) * 0.25));
+
 setAmbientIntensity(this, intensity);
 
   // Background hook (support object OR function)
@@ -1621,6 +1630,20 @@ if (
         break;
       }
 
+case "openPC": {
+  // Compatibility no-op: PC mode is driven by node.uiMode === "computer"
+  // Keep a flag in case you want UI polish later.
+  state.flags = state.flags || {};
+  state.flags.pc_opened_once = true;
+  break;
+}
+
+case "closePC": {
+  state.flags = state.flags || {};
+  state.flags.pc_closed_once = true;
+  break;
+}
+
 case "setFlag":
   if (data.flag) state.flags[data.flag] = (data.value ?? true);
   break;
@@ -1636,21 +1659,14 @@ case "setFlag":
 case "stareMirror": {
   state.flags = state.flags || {};
 
-    // --- sanity hit guards (per visit) ---
-  state.flags.mirror_sanity_hit_wrong =
-    state.flags.mirror_sanity_hit_wrong ?? false;
-
-  state.flags.mirror_sanity_hit_demon =
-    state.flags.mirror_sanity_hit_demon ?? false;
-
   const prevVariant = state.flags.mirrorVariant ?? "normal";
 
   // increment stares
   const amt = Number(data?.amount ?? 1);
   state.flags.mirror_stare_count = (state.flags.mirror_stare_count ?? 0) + amt;
 
-  // persistent wrong total across run
-  state.flags.mirror_wrong_total = state.flags.mirror_wrong_total ?? 0;
+  // counters
+  state.flags.mirror_wrong_hits = state.flags.mirror_wrong_hits ?? 0;
 
   // current variant
   const current = state.flags.mirrorVariant ?? "normal";
@@ -1659,58 +1675,55 @@ case "stareMirror": {
   if (current === "demon") break;
 
   // --- WRONG MIRROR: 1 in 15 ON EACH STARE ---
-  // (but don’t spam-trigger if it’s already wrong)
   const WRONG_CHANCE = 1 / 15;
   const canRollWrong = current !== "wrong";
 
   if (canRollWrong && Math.random() < WRONG_CHANCE) {
-  state.flags.mirrorVariant = "wrong";
-  state.flags.mirror_was_wrong = true;
-  state.flags.mirror_wrong_total += 1;
-  state.flags.mirror_demon_started = false;
+    state.flags.mirrorVariant = "wrong";
+    state.flags.mirror_was_wrong = true;
 
-  // ✅ sanity drop ONCE when it flips to wrong
-  state.maxSanity = state.maxSanity ?? 10;
-  state.sanity = state.sanity ?? state.maxSanity;
+    // ✅ COUNT THIS WRONG EVENT
+    state.flags.mirror_wrong_hits += 1;
 
-  if (prevVariant !== "wrong") {
+    // sanity drop once on flip
+    state.maxSanity = state.maxSanity ?? 10;
+    state.sanity = state.sanity ?? state.maxSanity;
     state.sanity = clamp(state.sanity - 1, 0, state.maxSanity);
+
+    // allow demon to be eligible again later (if you want)
+    state.flags.mirror_demon_started = false;
+
+    break;
   }
 
-  break;
-}
-
-  // --- DEMON: only after wrong total >= 3 AND deep stares ---
+  // --- DEMON: only after wrong hits >= 3 AND deep stares ---
   const DEMON_STARE_THRESHOLD = 10;
   const DEMON_CHANCE = 1 / 20;
 
   const eligibleForDemon =
-    state.flags.mirror_wrong_total >= 3 &&
+    state.flags.mirror_wrong_hits >= 3 &&
     state.flags.mirror_stare_count >= DEMON_STARE_THRESHOLD &&
     state.flags.mirrorVariant !== "demon" &&
     !state.flags.mirror_demon_started;
 
   if (eligibleForDemon && Math.random() < DEMON_CHANCE) {
-  state.flags.mirrorVariant = "demon";
-  state.flags.mirror_demon_started = true;
+    state.flags.mirrorVariant = "demon";
+    state.flags.mirror_demon_started = true;
 
-  // ✅ sanity drop ONCE when it flips to demon
-  state.maxSanity = state.maxSanity ?? 10;
-  state.sanity = state.sanity ?? state.maxSanity;
-
-  if (prevVariant !== "demon") {
+    // sanity drop once on flip
+    state.maxSanity = state.maxSanity ?? 10;
+    state.sanity = state.sanity ?? state.maxSanity;
     state.sanity = clamp(state.sanity - 2, 0, state.maxSanity);
-  }
 
-  break;
-}
+    break;
+  }
 
   // Otherwise: stay normal (or stay wrong if already wrong)
   if (state.flags.mirrorVariant == null) state.flags.mirrorVariant = "normal";
 
   console.log("[MIRROR] no trigger", {
     stares: state.flags.mirror_stare_count,
-    wrongTotal: state.flags.mirror_wrong_total,
+    wrongHits: state.flags.mirror_wrong_hits,
     variant: state.flags.mirrorVariant,
   });
 

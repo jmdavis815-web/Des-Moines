@@ -12,6 +12,22 @@ export const ITEM_DB = {
     },
   },
 
+  city_keycard: {
+  id: "city_keycard",
+  name: "City Keycard",
+  type: "key",
+  price: 0,
+  desc: "Stamped with a city seal. Not your company’s.",
+},
+
+usb_loop: {
+  id: "usb_loop",
+  name: "USB Drive (Loop/Protocol)",
+  type: "quest",
+  price: 0,
+  desc: "Handwritten label: “LOOP / MAYOR / PROTOCOL.”",
+},
+
   bandage: {
     id: "bandage",
     name: "Sterile Bandage",
