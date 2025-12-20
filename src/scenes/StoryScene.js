@@ -648,14 +648,33 @@ enterPcMode(ui) {
   // hide OS cursor while in PC
   this.input.setDefaultCursor("none");
 
+  // ✅ prevent stuck hijack from killing pointermove
+this._pcCursorHijack = false;
+this._pcCursorHijackUntil = 0;
+
+if (this._pcHijackTimer) {
+  this._pcHijackTimer.remove(false);
+  this._pcHijackTimer = null;
+}
+
   // show custom cursor NOW that it exists
-  if (this.pcUI?.cursor) {
-    this.pcUI.cursor.setVisible(true);
-    this._pcCursorTarget.x = this.scale.width / 2;
-    this._pcCursorTarget.y = this.scale.height / 2;
-    this._pcCursorPos.x = this._pcCursorTarget.x;
-    this._pcCursorPos.y = this._pcCursorTarget.y;
-  }
+if (this.pcUI?.cursor) {
+  this.pcUI.cursor.setVisible(true);
+
+  const cx = this.scale.width / 2;
+  const cy = this.scale.height / 2;
+
+  this._pcCursorTarget = this._pcCursorTarget || { x: cx, y: cy };
+  this._pcCursorPos    = this._pcCursorPos    || { x: cx, y: cy };
+
+  this._pcCursorTarget.x = cx;
+  this._pcCursorTarget.y = cy;
+  this._pcCursorPos.x = cx;
+  this._pcCursorPos.y = cy;
+
+  this.pcUI.cursor.setPosition(cx, cy);
+  this.pcUI.cursor.setDepth(30000); // ✅ re-assert in case something reset it
+}
 
   // decide how to render
   if (ui?.type === "desktop") {
@@ -774,9 +793,12 @@ if (!this.textures.exists("pc_cursor")) {
 }
 
 const cursor = this.add.image(width / 2, height / 2, "pc_cursor")
-  .setDepth(20000)
   .setAlpha(0.95)
-  .setVisible(false);
+  .setVisible(false)
+  .setOrigin(0, 0)         // hotspot at tip (top-left)
+  .setScrollFactor(0)
+  .setDepth(30000);        // higher than everything
+
 
 // cursor state
 this._pcCursorPos = { x: width / 2, y: height / 2 };
@@ -784,16 +806,47 @@ this._pcCursorTarget = { x: width / 2, y: height / 2 };
 this._pcCursorHijack = false;
 this._pcCursorHijackUntil = 0;
 
-// pointer move drives target (unless hijacked)
+// ✅ pointer down snaps cursor so clicks hit where the cursor *looks* like it is
+if (!this._pcPointerDownBound) {
+  this._pcPointerDownBound = true;
+
+  this.input.on("pointerdown", (p) => {
+    if (!this.pcMode) return;
+
+    // If not hijacked, keep fake cursor aligned with real pointer on click
+    if (!this._pcCursorHijack) {
+      this._pcCursorTarget.x = p.x;
+      this._pcCursorTarget.y = p.y;
+
+      this._pcCursorPos.x = p.x;
+      this._pcCursorPos.y = p.y;
+
+      if (this.pcUI?.cursor) this.pcUI.cursor.setPosition(p.x, p.y);
+    }
+  });
+
+  // ✅ pointer move drives cursor target (always track real mouse)
 if (!this._pcPointerMoveBound) {
   this._pcPointerMoveBound = true;
 
+  this._pcRealMouse = this._pcRealMouse || { x: width / 2, y: height / 2 };
+  this._pcHijackTarget = this._pcHijackTarget || { x: width / 2, y: height / 2 };
+
   this.input.on("pointermove", (p) => {
     if (!this.pcMode) return;
-    if (this._pcCursorHijack) return;
-    this._pcCursorTarget.x = p.x;
-    this._pcCursorTarget.y = p.y;
+
+    // always track real mouse
+    this._pcRealMouse.x = p.x;
+    this._pcRealMouse.y = p.y;
+
+    // normal mode follows real mouse
+    if (!this._pcCursorHijack) {
+      this._pcCursorTarget.x = p.x;
+      this._pcCursorTarget.y = p.y;
+    }
   });
+}
+
 }
 
 
@@ -1452,24 +1505,33 @@ exitPcMode(skipRender = false) {
   this.stopPcTerrorPack();
 
   // restore OS cursor
-this.input.setDefaultCursor("auto");
+  this.input.setDefaultCursor("auto");
+
+  // ✅ kill any active cursor hijack/glitch timers (prevents “ghost” behavior)
+  this.stopPcGlitch?.();
+
+  // ✅ close any PC typing timer
+  this.stopPcTyping?.();
 
   if (this.pcUI) {
+    // ✅ destroy cursor explicitly (FIXES cursor sprite stacking)
+    try { this.pcUI.cursor?.destroy?.(); } catch {}
+
     // close all PC windows cleanly
-try { this.pcUI?.winMan?.destroyAll?.(); } catch {}
-    try { this.pcUI.blocker.destroy(); } catch {}
-    try { this.pcUI.root.destroy(); } catch {}
+    try { this.pcUI?.winMan?.destroyAll?.(); } catch {}
+
+    // ✅ destroy blocker/root last
+    try { this.pcUI.blocker?.destroy?.(); } catch {}
+    try { this.pcUI.root?.destroy?.(); } catch {}
+
     this.pcUI = null;
   }
 
-  this.stopPcTyping();
-
   this.showStoryUI();
 
-if (!skipRender) {
-  this.renderNode();
-}
-
+  if (!skipRender) {
+    this.renderNode();
+  }
 }
 
 renderPcDesktop(ui) {
@@ -2219,7 +2281,7 @@ renderPcButtons(ui) {
       padding: { x: 10, y: 6 }
     })
     .setDepth(10000)
-    .setInteractive({ useHandCursor: true });
+    .setInteractive();
 
     t.on("pointerdown", () => {
   const state = this.registry.get("state");
@@ -2272,10 +2334,12 @@ startPcGlitch(ms = 900, strength = 1) {
       // bias toward the window content area
       const x = Phaser.Math.Between(Math.floor(w * 0.18), Math.floor(w * 0.82));
       const y = Phaser.Math.Between(Math.floor(h * 0.18), Math.floor(h * 0.78));
+      
+      // store target for lerp in your update loop
+      this._pcHijackTarget = this._pcHijackTarget || { x, y };
+      this._pcHijackTarget.x = x;
+      this._pcHijackTarget.y = y;
 
-      // "snap" target
-      this._pcCursorTarget.x = x;
-      this._pcCursorTarget.y = y;
     }
   });
 
@@ -3090,21 +3154,37 @@ case "resetMirrorVisit": {
       }
     }
   }
+
   update(time, delta) {
   if (!this.pcMode || !this.pcUI?.cursor) return;
 
+  // auto-release hijack if expired
+  if (this._pcCursorHijack && this.time.now > (this._pcCursorHijackUntil ?? 0)) {
+    this.stopPcGlitch();
+  }
+
   const cur = this._pcCursorPos;
-  const tgt = this._pcCursorTarget;
+  if (!cur) return;
 
-  // smooth movement to feel like OS cursor inertia
-  const s = Math.min(1, delta / 16);
-  const lerp = 0.35 * s;
+  const real = this._pcCursorTarget;
+  const haunt = this._pcHijackTarget || real;
+  const tgt = this._pcCursorHijack ? haunt : real;
 
-  cur.x += (tgt.x - cur.x) * lerp;
-  cur.y += (tgt.y - cur.y) * lerp;
+  if (!tgt) return;
+
+  if (this._pcCursorHijack) {
+    const s = Math.min(1, delta / 16);
+    const lerp = 0.22 * s;
+    cur.x += (tgt.x - cur.x) * lerp;
+    cur.y += (tgt.y - cur.y) * lerp;
+  } else {
+    cur.x = tgt.x;
+    cur.y = tgt.y;
+  }
 
   this.pcUI.cursor.setPosition(cur.x, cur.y);
 }
+
 }
 
 
