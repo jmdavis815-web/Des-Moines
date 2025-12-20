@@ -477,69 +477,104 @@ apartment_mirror: {
   },
 
   text: (state) => {
-    const stares = state.flags.mirror_stare_count ?? 0;
-    const v = state.flags?.mirrorVariant ?? "normal";
+  state.flags = state.flags || {};
 
-    // After wrong mirror happens enough times, drop a REAL lead
-state.flags.mirror_wrong_hits = (state.flags.mirror_wrong_hits ?? 0) + 1;
-if (state.flags.mirror_wrong_hits === 3 && !state.flags.mirror_lead_seen) {
-  return "mirror_lead_coordinates"; // or go directly to mirror_lead_docnumber
-}
+  // --------- DEMON HOLD DECAY (prevents "stuck demon") ----------
+  // If demon is active, it should not persist forever.
+  if (state.flags.mirrorVariant === "demon") {
+    state.flags.mirror_demon_hold = (state.flags.mirror_demon_hold ?? 2) - 1;
+    if (state.flags.mirror_demon_hold <= 0) {
+      state.flags.mirrorVariant = "normal";
+      delete state.flags.mirror_demon_hold;
+      // NOTE: mirror_demon_started stays true (progression memory)
+    }
+  }
 
-    if (!state.flags.mirror_intro_seen) {
-      state.flags.mirror_intro_seen = true;
-      return [
-        "You stare into the mirror.",
-        "",
-        "Your reflection stares back.",
-        "",
-        "For a moment, you feel like you’re watching a feed —",
-        "not a surface.",
-      ];
+  const stares = state.flags.mirror_stare_count ?? 0;
+  const v = state.flags.mirrorVariant ?? "normal";
+
+  // --------- WRONG COUNTING (only once per visit, only when wrong) ----------
+  if (v === "wrong") {
+    if (!state.flags._wrong_counted_this_visit) {
+      state.flags._wrong_counted_this_visit = true;
+      state.flags.mirror_wrong_hits = (state.flags.mirror_wrong_hits ?? 0) + 1;
     }
 
-    if (v === "wrong") {
+    // Lead once after 3 wrong hits total
+    if ((state.flags.mirror_wrong_hits ?? 0) >= 3 && !state.flags.mirror_lead_seen) {
+      state.flags.mirror_lead_seen = true;
       return [
-        "Your reflection is… off.",
+        "The reflection stops pretending.",
         "",
-        "Not like a distortion.",
-        "Like a decision.",
+        "For one frame — one *perfect* frame —",
+        "a set of coordinates burns into the glass like a watermark.",
         "",
-        "It blinks a half-beat late.",
+        "Then it’s gone.",
         "",
-        "And you realize you’ve been holding your breath without noticing.",
+        "But you *know* you saw it."
       ];
     }
+  } else {
+    // reset per-visit guard when not wrong
+    state.flags._wrong_counted_this_visit = false;
+  }
 
-    if (state.flags.fracture_note_survived && !state.flags.mirror_residue_taken) {
-  return "mirror_residue_mark";
-}
+  if (!state.flags.mirror_intro_seen) {
+    state.flags.mirror_intro_seen = true;
+    return [
+      "You stare into the mirror.",
+      "",
+      "Your reflection stares back.",
+      "",
+      "For a moment, you feel like you’re watching a feed —",
+      "not a surface.",
+    ];
+  }
 
-    if (v === "demon") {
-      return [
-        "The mirror looks too deep.",
-        "",
-        "The glass bows outward — just slightly.",
-        "",
-        "Not breaking.",
-        "Not cracking.",
-        "",
-        "As if something behind it is leaning closer.",
-      ];
-    }
+  if (v === "wrong") {
+    return [
+      "Your reflection is… off.",
+      "",
+      "Not like a distortion.",
+      "Like a decision.",
+      "",
+      "It blinks a half-beat late.",
+      "",
+      "And you realize you’ve been holding your breath without noticing.",
+    ];
+  }
 
+  if (state.flags.fracture_note_survived && !state.flags.mirror_residue_taken) {
+    return "mirror_residue_mark";
+  }
+
+  if (v === "demon") {
+    // give the demon clue once after it first triggers
     if (!state.flags.demon_clue_given && state.flags.mirror_demon_started) {
-  return "mirror_demon_clue";
-}
+      state.flags.demon_clue_given = true;
+      return "mirror_demon_clue";
+    }
 
     return [
-      "You look again.",
+      "The mirror looks too deep.",
       "",
-      "The longer you stay, the more the room feels staged around the mirror.",
+      "The glass bows outward — just slightly.",
       "",
-      `You’ve stared ${stares} time${stares === 1 ? "" : "s"}.`,
+      "Not breaking.",
+      "Not cracking.",
+      "",
+      "As if something behind it is leaning closer.",
     ];
-  },
+  }
+
+  return [
+    "You look again.",
+    "",
+    "The longer you stay, the more the room feels staged around the mirror.",
+    "",
+    `You’ve stared ${stares} time${stares === 1 ? "" : "s"}.`,
+  ];
+},
 
   choices: [
     // ✅ This action already contains your wrong/demon chance logic
@@ -552,6 +587,7 @@ if (state.flags.mirror_wrong_hits === 3 && !state.flags.mirror_lead_seen) {
     { label: "Turn away", action: "resetMirrorVisit", go: "intro_morning" },
   ],
 },
+
 
 apartment_mirror_touch: {
   title: "The Bathroom",
@@ -574,6 +610,12 @@ apartment_mirror_touch: {
 
   text: (state) => {
     const v = state.flags?.mirrorVariant ?? "normal";
+
+if (v === "wrong" && !state.flags._wrong_counted_this_visit) {
+  state.flags._wrong_counted_this_visit = true;
+  state.flags.mirror_wrong_hits = (state.flags.mirror_wrong_hits ?? 0) + 1;
+}
+
     if (v === "demon") {
       return [
         "Your fingertip meets the glass.",
@@ -901,7 +943,7 @@ office_arrival: {
     "No one checks you in.",
   ],
   choices: [
-    { label: "Go to your floor", go: "office_floor" },
+    { label: "Go to your floor", go: "office_floor_act0" },
     { label: "Check the security desk", go: "office_security_desk" },
     { label: "Step back outside", go: "office_outside_smoke" },
   ],
@@ -967,7 +1009,7 @@ office_outside_smoke: {
 // -------------------------
 // ACT 0 PART 3 — THE FLOOR
 // -------------------------
-office_floor: {
+office_floor_act0: {
   title: "Your Floor",
   meta: "Cubicles. Fluorescents. Silence with teeth.",
   tension: 0.50,
@@ -989,14 +1031,21 @@ office_floor: {
   ],
   choices: [
     { label: "Go to your desk", go: "office_desk" },
-    { label: "Check the breakroom", go: "office_breakroom" },
+    { label: "Check the breakroom", go: "office_breakroom_act0" },
     { label: "Check the copy room", go: "office_copyroom" },
     { label: "Use the restroom", go: "office_restroom" },
     { label: "Walk toward the executive hallway", go: "office_exec_hall" },
+    {
+  label: "Keep going (push through the afternoon)",
+  action: "advance",
+  data: { beat: 1 },
+  go: "office_floor"
+}
+
   ],
 },
 
-office_breakroom: {
+office_breakroom_act0: {
   title: "Breakroom",
   meta: "Microwave hum. Coffee that tastes like apology.",
   tension: 0.52,
@@ -1023,15 +1072,15 @@ office_breakroom: {
           label: "Search the bulletin board",
           action: "setFlag",
           data: { flag: "office_breakroom_searched", value: true },
-          go: "office_breakroom_board",
+          go: "office_breakroom_board_act0",
         },
       ]),
-      { label: "Back", go: "office_floor" },
+      { label: "Back", go: "office_floor_act0" },
     ];
   },
 },
 
-office_breakroom_board: {
+office_breakroom_board_act0: {
   title: "Bulletin Board",
   meta: "A flyer tries to disappear under your fingertips.",
   tension: 0.62,
@@ -1055,7 +1104,7 @@ office_breakroom_board: {
     "“If you remember the *click*, stop going home.”",
   ],
   choices: [
-    { label: "Back", go: "office_breakroom" },
+    { label: "Back", go: "office_breakroom_act0" },
   ],
 },
 
@@ -1091,7 +1140,7 @@ office_copyroom: {
           go: "office_copyroom_taken",
         },
       ]),
-      { label: "Back", go: "office_floor" },
+      { label: "Back", go: "office_floor_act0" },
     ];
   },
 },
@@ -1110,7 +1159,7 @@ office_copyroom_taken: {
     ...(state.flags?.failsafe_seen ? ["You remember another click. A different one.", ""] : []),
   ],
   choices: [
-    { label: "Back", go: "office_floor" },
+    { label: "Back", go: "office_floor_act0" },
   ],
 },
 
@@ -1140,7 +1189,7 @@ office_restroom: {
       ...(peeked ? [] : [
         { label: "Look inside the open stall", action: "loseSanity", data: { amount: 1 }, go: "office_restroom_stall" },
       ]),
-      { label: "Back", go: "office_floor" },
+      { label: "Back", go: "office_floor_act0" },
     ];
   },
 },
@@ -1206,7 +1255,7 @@ office_exec_hall: {
           { label: "Try the door (locked)", action: "loseSanity", data: { amount: 1 }, go: "office_exec_hall_locked" },
         ]),
       ]),
-      { label: "Back", go: "office_floor" },
+      { label: "Back", go: "office_floor_act0" },
     ];
   },
 },
@@ -1260,7 +1309,7 @@ office_exec_liaison: {
     // IMPORTANT: this uses your built-in PC engine mode
     { label: "Sit down at the computer", go: "workpc_desktop" },
     { label: "Search the desk drawers", go: "office_liaison_drawers" },
-    { label: "Back out slowly", go: "office_floor" },
+    { label: "Back out slowly", go: "office_floor_act0" },
   ],
 },
 
@@ -1887,7 +1936,11 @@ office_desk: {
     ];
   },
   choices: [
-    { label: "Open your workstation (PC)", action: "openPC", go: "office_pc" },
+    {
+  label: "Sit down at the computer",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+},
     { label: "Search your drawers", go: "office_drawers" },
     { label: "Back", go: "office_floor" },
   ],
@@ -1979,6 +2032,19 @@ office_pc: {
       ? "A warning flashes and vanishes too fast to read."
       : "A folder appears that wasn’t there a moment ago.";
 
+    // triggered desktop moments (not automatic overall; only once per visit)
+state.flags._pc_visit_tick = (state.flags._pc_visit_tick ?? 0) + 1;
+
+if (state.flags.pc_visits === 1 && !state.flags._pc_moment_first_visit) {
+  state.flags._pc_moment_first_visit = true;
+  state.flags._pc_moment_hint = "first_visit_sync";
+}
+
+if (state.flags.pc_visits === 2 && !state.flags._pc_moment_second_visit) {
+  state.flags._pc_moment_second_visit = true;
+  state.flags._pc_moment_hint = "second_visit_warning";
+}
+
     return {
       type: "desktop",
       wallpaperText,
@@ -1998,9 +2064,6 @@ office_pc: {
 
   text: () => [],
 
-  choices: [
-    { label: "Close workstation", action: "closePC", go: "office_floor" },
-  ],
 },
 
 // Optional decoy file to slow the player down
@@ -2031,7 +2094,12 @@ office_pc_decoy_policy: {
       "",
       "“Compliance ensures stability.”",
     ],
-    buttons: [{ label: "Back", go: "office_pc" }],
+    buttons: [{
+  label: "Back",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+],
   },
   text: () => [],
 },
@@ -2063,14 +2131,23 @@ office_pc_recycle: {
       icons: [
         { icon: "folder", key: "ARCHIVE", label: "ARCHIVE", go: archiveGo },
         { icon: "file", key: "TRASH", label: "readme.tmp", go: "office_pc_recycle_readme" },
-        { icon: "file", key: "BACK", label: "Back", go: "office_pc" },
+        { icon: "file", key: "BACK", label: "Back",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+
       ],
     };
   },
 
   text: () => [],
 
-  choices: [{ label: "Back", go: "office_pc" }],
+  choices: [{
+  label: "Back",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+],
 },
 
 office_pc_recycle_readme: {
@@ -2129,7 +2206,12 @@ office_pc_archive_locked: {
           : "You could swear it wasn’t locked a second ago.",
       ],
       buttons: [
-        { label: "Back", go: "office_pc" },
+        {
+  label: "Back",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+,
       ],
     };
   },
@@ -2157,6 +2239,13 @@ office_pc_archive: {
     state.flags = state.flags || {};
     state.flags.pc_archive_found = true;
     state.flags.ev_work_pc_archive = true; // evidence hook
+
+    // optional: bump evidence counter once
+    state.flags.evidence_count = state.flags.evidence_count ?? 0;
+    if (!state.flags._ev_pc_archive_counted) {
+      state.flags._ev_pc_archive_counted = true;
+      state.flags.evidence_count += 1;
+    }
   },
 
   computerUI: {
@@ -2164,48 +2253,47 @@ office_pc_archive: {
     wallpaperText: "ARCHIVE",
     hint: "Files don’t want to be found. This one does.",
     icons: [
-      { icon: "file", key: "CONT", label: "CONTINUITY_PROTOCOLS.txt", go: "office_doc_continuity" },
-      { icon: "file", key: "LOG", label: "INCIDENT_LOG_12A.txt", go: "office_doc_incident" },
-      { icon: "file", key: "CSV", label: "SUBLEVEL_ACCESS.csv", go: "office_doc_sublevel" },
-      { icon: "file", key: "BACK", label: "Back", go: "office_pc" },
+      { icon: "file", label: "CONTINUITY_PROTOCOLS.txt", go: "office_doc_continuity" },
+      { icon: "file", label: "INCIDENT_LOG_12A.txt", go: "office_doc_incident" },
+      { icon: "file", label: "SUBLEVEL_ACCESS.csv", go: "office_doc_sublevel" },
+      { icon: "folder", label: "BACK", go: "office_pc" },
+    ],
+    buttons: [
+      { label: "BACK", go: "office_pc" },
+      
     ],
   },
 
   text: () => [],
-
-  choices: [
-    { label: "Close folder", go: "office_pc" },
-    { label: "Step away", action: "closePC", go: "office_floor" },
-  ],
 },
+
 
 // ------------------------------------------------------------
 // READABLE “FILES” — AS PC MODALS (type: error)
 // ------------------------------------------------------------
 office_doc_continuity: {
-  title: "",
-  meta: "",
-  tension: 0.90,
-  backgroundLayers: () => ({
-    bg: "office_bg",
-    light: "office_light",
-    glow: "office_glow",
-    fg: "office_fg",
-  }),
-
   uiMode: "computer",
 
   onEnter: (state) => {
     state.flags = state.flags || {};
-    // optional small sanity sting for reading too much truth
-    // keep if you want the “adult” pressure
-    // (remove if you want sanity to be only passive)
+    // Optional: mark that the player read it
+    state.flags.ev_read_continuity = true;
+
+    // Optional: only apply sanity once (reading "truth" stings once)
+    if (!state.flags._sanity_continuity_once) {
+      state.flags._sanity_continuity_once = true;
+      // if you want consequence:
+      // state.maxSanity = state.maxSanity ?? 10;
+      // state.sanity = clamp((state.sanity ?? state.maxSanity) - 1, 0, state.maxSanity);
+    }
   },
 
+  // ✅ For the desktop-modal system: return LINES ONLY.
+  // Your desktop click opens these lines in a window (modal).
   computerUI: (state) => ({
-    type: "error",
-    title: "CONTINUITY_PROTOCOLS.txt",
-    message: [
+    lines: [
+      "CONTINUITY_PROTOCOLS.txt",
+      "----------------------------------------",
       "CONTINUITY PROTOCOLS — INTERNAL",
       "Version: 3.1",
       "",
@@ -2226,23 +2314,15 @@ office_doc_continuity: {
       "Office of Executive Continuity",
       "",
       ...(state.flags?.seed_retrofit_memo
-        ? ["You swallow. You saw those words: “failsafe.”", ""]
+        ? ["You swallow. You saw that word: “failsafe.”", ""]
         : []),
       "Your cursor blinks at the bottom of the file.",
       "It feels like it’s waiting for you to type a confession.",
     ],
-    buttons: [
-      { label: "Back", go: "office_pc_archive" },
-      { label: "Close ARCHIVE", go: "office_pc" },
-    ],
   }),
 
+  // ✅ Not used in PC mode, so remove them to avoid confusion
   text: () => [],
-
-  choices: [
-    // If you want reading to have consequence
-    { label: "Breathe and close it", action: "loseSanity", data: { amount: 1 }, go: "office_pc_archive" },
-  ],
 },
 
 office_doc_incident: {
@@ -5450,7 +5530,12 @@ office_pc_haunted: {
       title: "SYS_GUARD",
       message: lines,
       buttons: [
-        { label: "OK", go: "office_pc" },
+        {
+  label: "OK",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+,
         { label: "Open ARCHIVE", go: "office_pc_archive" }, // if you kept that archive node
       ],
     };
@@ -5480,7 +5565,12 @@ office_pc_unlock_haunt_flag: {
     "For a second, your cursor moves on its own.",
   ],
   choices: [
-    { label: "Sit down", action: "openPC", go: "office_pc" },
+    {
+  label: "Sit down at the computer",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+,
     { label: "Back away", go: "office_floor" },
   ],
 },
@@ -6100,7 +6190,12 @@ office_pc_doc_hint: {
         "Do not ask who is typing.",
       ],
       buttons: [
-        { label: "OK", go: "office_pc" },
+        {
+  label: "Ok",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+,
         { label: "Open ARCHIVE", go: "office_pc_archive" },
       ],
     };
@@ -6149,7 +6244,12 @@ office_afterhours: {
     return lines;
   },
   choices: [
-    { label: "Go to your workstation", go: "office_pc" },
+    {
+  label: "Go to your workstation",
+  action: "enterPCMode",
+  data: { nodeId: "office_pc" }
+}
+,
     { label: "Check the break room", go: "office_breakroom_night" },
     { label: "Listen near the supply closet", go: "office_supply_closet_door" },
     { label: "Leave the office", go: "apartment_post_records" },

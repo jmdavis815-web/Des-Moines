@@ -3,6 +3,7 @@ import { ITEM_DB } from "../db_items.js";
 import { addItem, removeItem, clamp, getTotalStats } from "../utils.js";
 import { startAmbientMusic, setAmbientIntensity } from "../audio/ambient.js";
 import { playDeathFX } from "../scenes/death_fx.js";
+import PCWindowManager from "../ui/PCWindowManager.js";
 
 export default class StoryScene extends Phaser.Scene {
   constructor() {
@@ -19,6 +20,8 @@ this.pcMode = false;
 this.pcTyping = null;
 this.pcLines = [];
 this.pcIndex = 0;
+this.pcTerror = null;     // terror runtime state
+this._pcTerrorTimer = null;
 }
 
 clearBleedSprites() {
@@ -639,17 +642,57 @@ enterPcMode(ui) {
   this.pcLines = [];
   this.pcIndex = 0;
 
-  // build UI if needed
+  // build UI first so cursor exists
   if (!this.pcUI) this.buildPcUI();
+
+  // hide OS cursor while in PC
+  this.input.setDefaultCursor("none");
+
+  // show custom cursor NOW that it exists
+  if (this.pcUI?.cursor) {
+    this.pcUI.cursor.setVisible(true);
+    this._pcCursorTarget.x = this.scale.width / 2;
+    this._pcCursorTarget.y = this.scale.height / 2;
+    this._pcCursorPos.x = this._pcCursorTarget.x;
+    this._pcCursorPos.y = this._pcCursorTarget.y;
+  }
 
   // decide how to render
   if (ui?.type === "desktop") {
     this.renderPcDesktop(ui);
   } else {
-    // default = terminal
     this.pcLines = ui?.lines ?? ["(no data)"];
     this.typePcLines(this.pcLines, 28);
   }
+
+  // buttons handled below (we’ll fix Exit injection next)
+  this.renderPcButtons(ui);
+
+  // ✅ only inject default EXIT when NOT a desktop
+  if (ui?.type !== "desktop" && (!ui?.buttons || !ui.buttons.length)) {
+    this.renderPcButtons({ buttons: [{ label: "EXIT", action: "closePC" }] });
+  }
+  const state = this.registry.get("state");
+if (state.flags?.pc_archive_found || state.flags?.failsafe_seen) {
+  this.startPcTerrorPack({ level: 2 });
+}
+// run desktop moments based on flags set by computerUI
+const s = this.registry.get("state");
+
+if (s.flags?._pc_moment_hint === "first_visit_sync") {
+  delete s.flags._pc_moment_hint;
+  this.pcMomentProgress({ title:"PROFILE", label:"Loading user profile…", ms: 1700 });
+}
+
+if (s.flags?._pc_moment_hint === "second_visit_warning") {
+  delete s.flags._pc_moment_hint;
+  this.pcMomentError({
+    title: "WARNING",
+    variant: "warn",
+    message: ["A warning flashes and vanishes too fast to read.", "", "…but the workstation read you."],
+  });
+  this.startPcGlitch(800, 1.2);
+}
 }
 
 buildPcUI() {
@@ -665,7 +708,9 @@ buildPcUI() {
   const dim = this.add.image(0, 0, "pc_dim").setOrigin(0).setDisplaySize(width, height);
   const wallpaper = this.add.image(width / 2, height / 2, "pc_wallpaper").setDisplaySize(width, height);
 
-  const desktopLayer = this.add.container(80, 120);
+  // ✅ place icons inside the window content area (not on the frame)
+const desktopLayer = this.add.container(140, 120);
+
 
   const terminalText = this.add.text(120, 160, "", {
     fontFamily: "monospace",
@@ -677,33 +722,741 @@ buildPcUI() {
 
   const taskbar = this.add.image(0, 0, "pc_taskbar").setOrigin(0).setDisplaySize(width, height);
   const windowFrame = this.add.image(0, 0, "pc_window").setOrigin(0).setDisplaySize(width, height);
+  // ✅ Clickable close/minimize dots on the window frame (feel like a real OS)
+const closeHit = this.add.rectangle(width - 42, 44, 28, 22, 0x000000, 0.001)
+  .setInteractive()
+  .setDepth(10001);
+
+closeHit.on("pointerdown", () => {
+  // close PC overlay back to story
+  this.exitPcMode();
+});
+
+root.add(closeHit);
 
   const modal = this.add.image(width / 2, height / 2, "pc_modal")
     .setVisible(false)
     .setDepth(10000);
 
-  root.add([dim, wallpaper, desktopLayer, terminalText, taskbar, windowFrame, modal]);
+    // ✅ modal text content
+const modalText = this.add.text(width / 2 - 330, height / 2 - 180, "", {
+  fontFamily: "monospace",
+  fontSize: "18px",
+  color: "#e6f0ff",
+  lineSpacing: 6,
+  wordWrap: { width: 660 }
+})
+.setDepth(10001)
+.setVisible(false);
 
+// ✅ modal close button (looks like OS close)
+const modalClose = this.add.text(width / 2 + 300, height / 2 - 220, "✕", {
+  fontFamily: "monospace",
+  fontSize: "26px",
+  color: "#ffffff",
+})
+.setDepth(10002)
+.setVisible(false)
+.setInteractive();
+
+modalClose.on("pointerdown", () => this.closePcModal());
+
+root.add([modalText, modalClose]);
+
+
+// create cursor texture if you don't have one
+if (!this.textures.exists("pc_cursor")) {
+  const g = this.make.graphics({ x: 0, y: 0, add: false });
+  g.fillStyle(0xffffff, 1);
+  g.fillTriangle(0, 0, 0, 26, 18, 18);
+  g.generateTexture("pc_cursor", 24, 28);
+  g.destroy();
+}
+
+const cursor = this.add.image(width / 2, height / 2, "pc_cursor")
+  .setDepth(20000)
+  .setAlpha(0.95)
+  .setVisible(false);
+
+// cursor state
+this._pcCursorPos = { x: width / 2, y: height / 2 };
+this._pcCursorTarget = { x: width / 2, y: height / 2 };
+this._pcCursorHijack = false;
+this._pcCursorHijackUntil = 0;
+
+// pointer move drives target (unless hijacked)
+if (!this._pcPointerMoveBound) {
+  this._pcPointerMoveBound = true;
+
+  this.input.on("pointermove", (p) => {
+    if (!this.pcMode) return;
+    if (this._pcCursorHijack) return;
+    this._pcCursorTarget.x = p.x;
+    this._pcCursorTarget.y = p.y;
+  });
+}
+
+
+  root.add([dim, wallpaper, desktopLayer, terminalText, taskbar, windowFrame, modal]);
+    const exitBtn = this.add.text(width - 140, 18, "[ X EXIT ]", {
+    fontFamily: "monospace",
+    fontSize: "18px",
+    color: "#ffffff",
+    backgroundColor: "#1b0f14",
+    padding: { x: 10, y: 6 }
+  })
+  .setDepth(10001)
+  .setInteractive();
+
+  exitBtn.on("pointerdown", () => {
+    this.applyAction({ action: "closePC", data: {} });
+  });
+
+  root.add(exitBtn);
   // ✅ NOW assign pcUI (after variables exist)
-  this.pcUI = {
-    blocker,
-    root,
-    desktopLayer,
-    terminalText,
-    modal,
-    icons: [],
-    frameBounds: { x: 0, y: 0, w: width, h: height } // ✅ here
-  };
+  // ✅ NOW assign pcUI (after variables exist)
+this.pcUI = {
+  blocker,
+  root,
+  desktopLayer,
+  terminalText,
+
+  // keep your legacy modal system (optional)
+  modal,
+  modalText,
+  modalClose,
+  cursor,
+
+  icons: [],
+  frameBounds: { x: 0, y: 0, w: width, h: height }
+};
+
+  // --- Window Manager (multi-window OS) ---
+this.pcUI.winMan = new PCWindowManager(this, {
+  baseDepth: 15000,
+  bounds: () => ({
+    x: 110,
+    y: 110,
+    w: this.scale.width - 220,
+    h: this.scale.height - 220,
+  })
+});
+
+    // ✅ ESC always closes PC overlay
+  if (!this._pcEscKey) {
+    this._pcEscKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+  }
+  this._pcEscKey.removeAllListeners();
+  this._pcEscKey.on("down", () => {
+    if (!this.pcMode) return;
+    this.applyAction({ action: "closePC", data: {} });
+  });
 
   // keep it correct on resize
   this.bindPcResizeHandler();
 }
 
+// ============================
+// PC TERROR PACK (Haunted OS)
+// ============================
+
+startPcTerrorPack(opts = {}) {
+  if (!this.pcMode || !this.pcUI?.winMan) return;
+
+  // prevent double-start
+  if (this.pcTerror?.active) return;
+
+  const state = this.registry.get("state");
+  state.flags = state.flags || {};
+
+  this.pcTerror = {
+    active: true,
+    level: opts.level ?? 1,          // 1..3 intensity
+    startedAt: this.time.now,
+    nextBurstAt: this.time.now + 1200,
+    lastPopupAt: 0,
+    lastTerminalAt: 0,
+    lastProgressAt: 0,
+    lastCursorHijackAt: 0,
+    stickyPopups: 0,
+    // "stealing files" meta (purely cosmetic)
+    fakeStolen: state.flags.pc_fake_stolen ?? 0
+  };
+
+  // cadence loop
+  if (this._pcTerrorTimer) this._pcTerrorTimer.remove(false);
+  this._pcTerrorTimer = this.time.addEvent({
+    delay: 250,
+    loop: true,
+    callback: () => this.tickPcTerrorPack()
+  });
+}
+
+stopPcTerrorPack() {
+  if (this._pcTerrorTimer) {
+    this._pcTerrorTimer.remove(false);
+    this._pcTerrorTimer = null;
+  }
+  if (this.pcTerror) this.pcTerror.active = false;
+
+  // stop any ongoing progress timers we started
+  if (this._pcHackTimer) {
+    this._pcHackTimer.remove(false);
+    this._pcHackTimer = null;
+  }
+}
+
+tickPcTerrorPack() {
+  if (!this.pcMode || !this.pcUI?.winMan || !this.pcTerror?.active) return;
+
+  const t = this.pcTerror;
+  const now = this.time.now;
+
+  // ramp intensity over time
+  const aliveSec = (now - t.startedAt) / 1000;
+  let intensity = t.level;
+
+  if (aliveSec > 12) intensity = Math.min(3, intensity + 1);
+  if (aliveSec > 24) intensity = 3;
+
+  // occasional cursor hijack + glitch overlay
+  if (now - t.lastCursorHijackAt > (intensity === 3 ? 2500 : intensity === 2 ? 4200 : 6500)) {
+    if (Math.random() < (intensity === 3 ? 0.55 : intensity === 2 ? 0.35 : 0.18)) {
+      t.lastCursorHijackAt = now;
+      this.startPcGlitch(Phaser.Math.Between(650, 1200), 1 + intensity * 0.35);
+    }
+  }
+
+  // bursts of “OS activity”
+  if (now >= t.nextBurstAt) {
+    t.nextBurstAt = now + Phaser.Math.Between(800, intensity === 3 ? 1600 : 2300);
+
+    const roll = Math.random();
+
+    // 0) Sometimes: “sticky” popups (won’t stop)
+    if (intensity >= 2 && roll < 0.12) {
+      this.pcTerrorBurstStickyPopups(intensity);
+      return;
+    }
+
+    // 1) Error popups
+    if (roll < 0.46) {
+      this.pcTerrorBurstError(intensity);
+      return;
+    }
+
+    // 2) Terminal windows
+    if (roll < 0.76) {
+      this.pcTerrorBurstTerminal(intensity);
+      return;
+    }
+
+    // 3) Fake hacking progress
+    this.pcTerrorBurstProgress(intensity);
+  }
+}
+
+// ---------- BURSTS ----------
+
+pcTerrorBurstError(intensity) {
+  const now = this.time.now;
+  if (now - this.pcTerror.lastPopupAt < 700) return;
+  this.pcTerror.lastPopupAt = now;
+
+  const errors = [
+    {
+      title: "SYSTEM ERROR",
+      variant: "error",
+      msg: [
+        "The instruction at 0x00000000 referenced memory at 0x00000000.",
+        "The memory could not be read.",
+        "",
+        "Click OK to terminate the program."
+      ],
+      buttons: [
+        { label: "OK", action: "close" },
+        { label: "CANCEL", onClick: () => {
+            this.openPcToast("You can't cancel this.", { title: "SYSTEM", variant: "warn", autoCloseMs: 1200 });
+          }
+        }
+      ]
+    },
+    {
+      title: "ACCESS DENIED",
+      variant: "error",
+      msg: [
+        "Windows cannot access the specified device, path, or file.",
+        "",
+        "You may not have the appropriate permissions."
+      ],
+      buttons: [
+        { label: "OK", action: "close" },
+        { label: "DETAILS", onClick: () => {
+            this.openPcModal([
+              "CODE: 0x80070005",
+              "SOURCE: explorer.exe",
+              "NOTE: Something is already inside this session."
+            ], { title: "DETAILS" });
+          }
+        }
+      ]
+    },
+    {
+      title: "EXPLORER NOT RESPONDING",
+      variant: "warn",
+      msg: [
+        "explorer.exe is not responding.",
+        "",
+        "If you close the program, you might lose information."
+      ],
+      buttons: [
+        { label: "WAIT", action: "close" },
+        { label: "CLOSE PROGRAM", onClick: () => {
+            this.startPcGlitch(900, 1.6);
+            this.openPcToast("Attempting recovery...", { variant: "info", autoCloseMs: 1400 });
+          }
+        }
+      ]
+    },
+    {
+      title: "SECURITY ALERT",
+      variant: "warn",
+      msg: [
+        "Unusual activity detected.",
+        "A process is attempting to access protected files."
+      ],
+      buttons: [
+        { label: "ALLOW", onClick: () => {
+            this.openPcToast("Permission granted.", { variant: "error", title: "SYSTEM" });
+          }
+        },
+        { label: "BLOCK", onClick: () => {
+            this.openPcToast("Blocking failed.", { variant: "error", title: "SYSTEM" });
+          }
+        }
+      ]
+    }
+  ];
+
+  const pick = errors[Phaser.Math.Between(0, errors.length - 1)];
+
+  // place near cursor like real OS annoyance
+  const x = Phaser.Math.Clamp((this._pcCursorPos?.x ?? this.scale.width / 2) - 240, 120, this.scale.width - 760);
+  const y = Phaser.Math.Clamp((this._pcCursorPos?.y ?? this.scale.height / 2) - 110, 120, this.scale.height - 360);
+
+  this.openPcErrorDialog(pick.msg, {
+    title: pick.title,
+    variant: pick.variant,
+    buttons: pick.buttons,
+    w: intensity === 3 ? 700 : 640,
+    h: 320,
+    x,
+    y
+  });
+}
+
+pcTerrorBurstTerminal(intensity) {
+  const now = this.time.now;
+  if (now - this.pcTerror.lastTerminalAt < 1200) return;
+  this.pcTerror.lastTerminalAt = now;
+
+  const scripts = this.buildTerrorTerminalScripts();
+
+  const script = scripts[Phaser.Math.Between(0, scripts.length - 1)];
+  const id = `term_${Date.now()}_${Phaser.Math.Between(100, 999)}`;
+
+  const win = this.pcUI.winMan.createTextWindow({
+    id,
+    title: script.title || "TERMINAL",
+    lines: [""],
+    w: 820,
+    h: 520,
+    x: Phaser.Math.Between(160, this.scale.width - 980),
+    y: Phaser.Math.Between(140, this.scale.height - 640)
+  });
+
+  this.typeIntoPcWindow(id, script.lines, {
+    cps: intensity === 3 ? 44 : intensity === 2 ? 34 : 26,
+    jitter: intensity >= 2
+  });
+
+  // sometimes spawn follow-up toast
+  if (intensity >= 2 && Math.random() < 0.35) {
+    this.time.delayedCall(900, () => {
+      this.openPcToast("Stop watching me.", { title: "SYSTEM", variant: "warn", autoCloseMs: 1600 });
+    });
+  }
+}
+
+pcTerrorBurstProgress(intensity) {
+  const now = this.time.now;
+  if (now - this.pcTerror.lastProgressAt < 1800) return;
+  this.pcTerror.lastProgressAt = now;
+
+  const state = this.registry.get("state");
+  state.flags = state.flags || {};
+
+  const actions = [
+    { title: "Windows Security", label: "Scanning protected files…" },
+    { title: "System", label: "Indexing Documents…" },
+    { title: "Update Service", label: "Installing critical updates…" },
+    { title: "Background Transfer", label: "Uploading archives…" },
+    { title: "Encryption Service", label: "Encrypting user data…" }
+  ];
+
+  const pick = actions[Phaser.Math.Between(0, actions.length - 1)];
+  const id = `prog_${Date.now()}_${Phaser.Math.Between(100, 999)}`;
+
+  this.pcUI.winMan.createProgressWindow({
+    id,
+    title: pick.title,
+    label: pick.label,
+    w: 640,
+    h: 260,
+    x: Phaser.Math.Between(170, this.scale.width - 820),
+    y: Phaser.Math.Between(150, this.scale.height - 420)
+  });
+
+  // drive the progress bar
+  const totalMs = Phaser.Math.Between(
+    intensity === 3 ? 1400 : 2200,
+    intensity === 3 ? 3200 : 5200
+  );
+
+  const started = this.time.now;
+  if (this._pcHackTimer) this._pcHackTimer.remove(false);
+
+  this._pcHackTimer = this.time.addEvent({
+    delay: 60,
+    loop: true,
+    callback: () => {
+      if (!this.pcMode || !this.pcUI?.winMan) {
+        this._pcHackTimer?.remove(false);
+        this._pcHackTimer = null;
+        return;
+      }
+
+      const p = Phaser.Math.Clamp((this.time.now - started) / totalMs, 0, 1);
+
+      // creepy non-linear jumps
+      const eased = Math.pow(p, 0.7);
+      this.pcUI.winMan.setProgress(id, eased);
+
+      // at end: “steal files” toast
+      if (p >= 1) {
+        this._pcHackTimer.remove(false);
+        this._pcHackTimer = null;
+
+        this.pcUI.winMan.setProgress(id, 1, "100%");
+        this.time.delayedCall(280, () => {
+          // pretend “files stolen” count
+          this.pcTerror.fakeStolen += Phaser.Math.Between(2, 7);
+          state.flags.pc_fake_stolen = this.pcTerror.fakeStolen;
+
+          this.openPcToast(
+            `Background transfer complete.\n${this.pcTerror.fakeStolen} files processed.`,
+            { title: "SYSTEM", variant: "info", autoCloseMs: 2200 }
+          );
+
+          // sometimes drop an error right after success
+          if (intensity >= 2 && Math.random() < 0.45) {
+            this.time.delayedCall(420, () => this.pcTerrorBurstError(intensity));
+          }
+        });
+      }
+    }
+  });
+}
+
+pcTerrorBurstStickyPopups(intensity) {
+  // creates a little “storm” of popups
+  const lines = [
+    "I see you.",
+    "Stop clicking.",
+    "Don't close it.",
+    "You invited me in.",
+    "It's not your computer anymore."
+  ];
+
+  const count = intensity === 3 ? 4 : 3;
+  for (let i = 0; i < count; i++) {
+    this.time.delayedCall(i * 260, () => {
+      this.openPcToast(lines[Phaser.Math.Between(0, lines.length - 1)], {
+        title: "SYSTEM",
+        variant: (Math.random() < 0.5) ? "warn" : "error",
+        autoCloseMs: intensity === 3 ? 0 : 2200 // intensity 3: some stick around
+      });
+    });
+  }
+
+  // extra glitch
+  this.startPcGlitch(Phaser.Math.Between(700, 1200), 1.6);
+}
+
+// ---------- TERMINAL SCRIPT LIBRARY ----------
+
+buildTerrorTerminalScripts() {
+  const stolen = this.pcTerror?.fakeStolen ?? 0;
+  const stamp = new Date().toLocaleTimeString();
+
+  return [
+    {
+      title: "Windows Terminal",
+      lines: [
+        `${stamp}  Microsoft Windows [Version 10.0.19045.0]`,
+        "(c) Microsoft Corporation. All rights reserved.",
+        "",
+        "C:\\Users\\You> dir",
+        " Volume in drive C is OS",
+        " Directory of C:\\Users\\You",
+        "",
+        "12/20/2025  03:41 AM    <DIR>          Documents",
+        "12/20/2025  03:41 AM    <DIR>          Desktop",
+        "12/20/2025  03:41 AM    <DIR>          Pictures",
+        "12/20/2025  03:41 AM             9,421 notes.txt",
+        "",
+        "C:\\Users\\You> type notes.txt",
+        "…you shouldn't have opened the door…",
+        "",
+        "C:\\Users\\You> _"
+      ]
+    },
+    {
+      title: "Command Prompt",
+      lines: [
+        "C:\\> whoami",
+        "you\\you",
+        "",
+        "C:\\> netstat -ano",
+        "Active Connections",
+        "  Proto  Local Address          Foreign Address        State           PID",
+        "  TCP    127.0.0.1:5500         0.0.0.0:0              LISTENING       1337",
+        "",
+        "C:\\> tasklist | findstr explorer",
+        "explorer.exe                 4020 Console                    1     68,144 K",
+        "",
+        "C:\\> echo hello",
+        "hello",
+        "C:\\> echo hello?",
+        "hello?",
+        "C:\\> echo HELLO?",
+        "HELLO?",
+        "C:\\> echo why can you hear me",
+        "why can you hear me",
+        "",
+        "C:\\> _"
+      ]
+    },
+    {
+      title: "System Shell",
+      lines: [
+        ">>> initializing session",
+        ">>> reading user profile",
+        `>>> archived count: ${stolen}`,
+        ">>> locating: Documents\\*",
+        ">>> hashing files...",
+        ">>> done.",
+        "",
+        ">>> you won't miss them until later",
+        ">>> _"
+      ]
+    }
+  ];
+}
+
+// ---------- TYPEWRITER INTO WINDOWS ----------
+
+typeIntoPcWindow(winId, lines, opts = {}) {
+  const cps = opts.cps ?? 30; // chars/sec
+  const delay = Math.max(10, Math.floor(1000 / cps));
+  const jitter = !!opts.jitter;
+
+  const full = (Array.isArray(lines) ? lines : [String(lines)]).join("\n");
+  let idx = 0;
+
+  // set empty first
+  this.pcUI.winMan.setText(winId, "");
+
+  const ev = this.time.addEvent({
+    delay,
+    loop: true,
+    callback: () => {
+      if (!this.pcMode || !this.pcUI?.winMan) {
+        ev.remove(false);
+        return;
+      }
+
+      idx++;
+      const slice = full.slice(0, idx);
+
+      this.pcUI.winMan.setText(winId, slice);
+
+      // tiny tremble while typing (haunted hands)
+      if (jitter && Math.random() < 0.08) this.startPcGlitch(220, 0.8);
+
+      if (idx >= full.length) {
+        ev.remove(false);
+      }
+    }
+  });
+
+  return ev;
+}
+
+// ============================
+// PC MOMENTS (triggered terror)
+// ============================
+
+pcMomentProgress({ title="SYSTEM", label="Working…", ms=2200, onDone=null } = {}) {
+  if (!this.pcMode || !this.pcUI?.winMan) return;
+
+  const id = `prog_${Date.now()}_${Phaser.Math.Between(100,999)}`;
+
+  this.pcUI.winMan.createProgressWindow({
+    id,
+    title,
+    label,
+    w: 640,
+    h: 260,
+    x: Phaser.Math.Between(170, this.scale.width - 820),
+    y: Phaser.Math.Between(140, this.scale.height - 420),
+  });
+
+  const started = this.time.now;
+
+  const timer = this.time.addEvent({
+    delay: 50,
+    loop: true,
+    callback: () => {
+      if (!this.pcMode || !this.pcUI?.winMan) { timer.remove(false); return; }
+
+      const p = Phaser.Math.Clamp((this.time.now - started) / ms, 0, 1);
+
+      // “hacking” feel: non-linear + stutter
+      const stutter = (Math.random() < 0.06) ? Phaser.Math.FloatBetween(-0.05, 0.02) : 0;
+      const eased = Phaser.Math.Clamp(Math.pow(p, 0.72) + stutter, 0, 1);
+
+      this.pcUI.winMan.setProgress(id, eased);
+
+      if (p >= 1) {
+        timer.remove(false);
+        this.pcUI.winMan.setProgress(id, 1, "100%");
+        this.time.delayedCall(220, () => {
+          try { this.pcUI?.winMan?.closeWindow?.(id); } catch {}
+          try { onDone?.(); } catch {}
+        });
+      }
+    }
+  });
+}
+
+pcMomentError({ title="ERROR", variant="error", message=[], buttons=null } = {}) {
+  // requires your openPcErrorDialog helper + winMan.createErrorWindow
+  this.openPcErrorDialog(message, {
+    title,
+    variant,
+    buttons: buttons || [{ label: "OK", action: "close" }],
+    w: 660,
+    h: 320,
+    x: Phaser.Math.Clamp((this._pcCursorPos?.x ?? this.scale.width/2) - 260, 120, this.scale.width - 780),
+    y: Phaser.Math.Clamp((this._pcCursorPos?.y ?? this.scale.height/2) - 120, 120, this.scale.height - 420),
+  });
+}
+
+pcMomentToast(text, opts={}) {
+  this.openPcToast(text, {
+    title: opts.title || "SYSTEM",
+    variant: opts.variant || "info",
+    autoCloseMs: opts.autoCloseMs ?? 1600
+  });
+}
+
+pcMomentCrashBurst(strength = 1.3) {
+  // visual: glitch + shake + cascade error
+  this.startPcGlitch(Phaser.Math.Between(700, 1200), strength);
+  this.time.delayedCall(120, () => {
+    this.pcMomentError({
+      title: "EXPLORER.EXE",
+      variant: "error",
+      message: [
+        "A fatal exception 0E has occurred at 0028:C0011E36.",
+        "The current application will be terminated.",
+        "",
+        "Press OK to terminate the application."
+      ],
+      buttons: [{ label: "OK", action: "close" }]
+    });
+  });
+}
+
+pcMomentCursorHijackTo(x, y, ms=800) {
+  if (!this.pcMode) return;
+
+  this._pcCursorHijack = true;
+  this._pcCursorHijackUntil = this.time.now + ms;
+
+  // shove target to a specific place (like ARCHIVE icon)
+  this._pcCursorTarget.x = x;
+  this._pcCursorTarget.y = y;
+
+  // release
+  this.time.delayedCall(ms, () => {
+    this._pcCursorHijack = false;
+  });
+}
+
+pcMomentTerminalBurst(lines, title="Windows Terminal") {
+  if (!this.pcMode || !this.pcUI?.winMan) return;
+
+  const id = `term_${Date.now()}_${Phaser.Math.Between(100,999)}`;
+
+  this.pcUI.winMan.createTextWindow({
+    id,
+    title,
+    lines: [""],
+    w: 820,
+    h: 520,
+    x: Phaser.Math.Between(160, this.scale.width - 980),
+    y: Phaser.Math.Between(140, this.scale.height - 640)
+  });
+
+  // uses your existing typeIntoPcWindow from terror pack
+  this.typeIntoPcWindow(id, lines, { cps: 34, jitter: true });
+}
+
+// convenience: find approximate icon position for hijack
+pcGetDesktopIconXY(label = "ARCHIVE") {
+  // icons are created around fixed grid in renderPcDesktop
+  // we’ll approximate based on your layout: x=30+col*140, y=30+row*120 inside desktopLayer offset (140,120)
+  const baseX = 140; // desktopLayer x
+  const baseY = 120; // desktopLayer y
+
+  const icons = (this._lastPcUi?.icons || []);
+  const idx = icons.findIndex(i => (i.label || "").toUpperCase() === label.toUpperCase());
+
+  if (idx < 0) return { x: this.scale.width * 0.5, y: this.scale.height * 0.5 };
+
+  const colW = 140, rowH = 120, cols = 5;
+  const col = idx % cols;
+  const row = Math.floor(idx / cols);
+
+  const x = baseX + (30 + col * colW);
+  const y = baseY + (30 + row * rowH);
+
+  return { x, y };
+}
+
 exitPcMode(skipRender = false) {
   this.pcMode = false;
   this._lastPcUi = null;
+  this.stopPcTerrorPack();
+
+  // restore OS cursor
+this.input.setDefaultCursor("auto");
 
   if (this.pcUI) {
+    // close all PC windows cleanly
+try { this.pcUI?.winMan?.destroyAll?.(); } catch {}
     try { this.pcUI.blocker.destroy(); } catch {}
     try { this.pcUI.root.destroy(); } catch {}
     this.pcUI = null;
@@ -711,10 +1464,12 @@ exitPcMode(skipRender = false) {
 
   this.stopPcTyping();
 
-  if (!skipRender) {
-    this.showStoryUI();
-    this.renderNode();
-  }
+  this.showStoryUI();
+
+if (!skipRender) {
+  this.renderNode();
+}
+
 }
 
 renderPcDesktop(ui) {
@@ -725,6 +1480,7 @@ renderPcDesktop(ui) {
   layer.removeAll(true);
   this.pcUI.icons.length = 0;
 
+  // desktop visible, terminal hidden
   this.pcUI.terminalText.setText("").setVisible(false);
   layer.setVisible(true);
 
@@ -737,8 +1493,8 @@ renderPcDesktop(ui) {
     const col = i % cols;
     const row = Math.floor(i / cols);
 
-    const x = col * colW;
-    const y = row * rowH;
+    const x = 30 + col * colW;
+    const y = 30 + row * rowH;
 
     const key =
       ic.icon === "folder" ? "pc_icon_folder" :
@@ -748,7 +1504,7 @@ renderPcDesktop(ui) {
 
     const sprite = this.add.image(x, y, key)
       .setOrigin(0.5)
-      .setInteractive({ useHandCursor: true });
+      .setInteractive();
 
     const label = this.add.text(x - 55, y + 52, ic.label ?? "FILE", {
       fontFamily: "monospace",
@@ -759,17 +1515,233 @@ renderPcDesktop(ui) {
     });
 
     sprite.on("pointerdown", () => {
-      if (!ic.go) return;
-      state.nodeId = ic.go;
-      this.exitPcMode(true);
-      this.renderNode();
+  // if a modal/window is open, you can choose to keep it (real OS),
+  // or close it for focus feel. We'll keep OS-real: DO NOT force-close.
+
+  // ✅ ACTION icons (optional)
+  if (ic.action) {
+    this.applyAction({ action: ic.action, data: ic.data || {} });
+    return;
+  }
+
+  // ✅ must have go to open something
+  if (!ic.go) return;
+
+  const target = NODES[ic.go];
+  if (!target) {
+    this.openPcModal([`Missing PC node: ${ic.go}`], { title: "ERROR" });
+    return;
+  }
+
+  // run onEnter for evidence hooks
+  const state = this.registry.get("state");
+  try { target.onEnter?.(state); } catch (e) { console.warn("PC onEnter failed:", e); }
+
+  const nextUI = (typeof target.computerUI === "function")
+    ? target.computerUI(state)
+    : target.computerUI;
+
+    // ============================
+// TRIGGERED PC TERROR MOMENTS
+// ============================
+this._lastPcUi = ui; // keep for hijack helpers
+
+// one-time gating flags so moments don’t spam
+const s = this.registry.get("state");
+s.flags = s.flags || {};
+
+const goId = ic.go;
+
+// A) Opening ARCHIVE (locked) => “requesting access…” then denial + cursor jerk
+if (goId === "office_pc_archive_locked" && !s.flags._pc_moment_archive_locked_once) {
+  s.flags._pc_moment_archive_locked_once = true;
+
+  this.pcMomentProgress({
+    title: "SECURITY",
+    label: "Requesting access token…",
+    ms: 1800,
+    onDone: () => {
+      this.pcMomentError({
+        title: "ACCESS DENIED",
+        variant: "error",
+        message: [
+          "You do not have permission to access ARCHIVE.",
+          "",
+          "Audit logged.",
+          "Administrator has been notified."
+        ],
+      });
+
+      // shove cursor away like it’s being “removed”
+      this.startPcGlitch(800, 1.4);
+    }
+  });
+}
+
+// B) First time ARCHIVE opens => decrypt progress + terminal whisper
+if (goId === "office_pc_archive" && !s.flags._pc_moment_archive_open_once) {
+  s.flags._pc_moment_archive_open_once = true;
+
+  this.pcMomentProgress({
+    title: "ARCHIVE",
+    label: "Decrypting container…",
+    ms: 2400,
+    onDone: () => {
+      this.pcMomentTerminalBurst([
+        "C:\\> mount ARCHIVE",
+        "mount: success",
+        "",
+        "C:\\> echo hello",
+        "hello",
+        "C:\\> echo HELLO?",
+        "HELLO?",
+        "",
+        "C:\\> _"
+      ], "Command Prompt");
+      this.pcMomentToast("NEW DEVICE DETECTED: [UNKNOWN]", { variant: "warn", autoCloseMs: 1800 });
+this.time.delayedCall(900, () => {
+  this.pcMomentToast("File transfer in progress…", { variant: "info", autoCloseMs: 2200 });
+});
+      this.pcMomentToast("A folder that shouldn’t exist… does.", { variant: "warn", autoCloseMs: 2000 });
+    }
+  });
+}
+
+// C) Clicking IT policy decoy => small crash + “compliance” warning
+if (goId === "office_pc_decoy_policy" && !s.flags._pc_moment_policy_once) {
+  s.flags._pc_moment_policy_once = true;
+
+  this.pcMomentCrashBurst(1.2);
+  this.time.delayedCall(450, () => {
+    this.pcMomentToast("Compliance ensures stability.", { variant: "error", autoCloseMs: 1800 });
+  });
+}
+
+// D) Clicking CONTINUITY file => cursor hijack toward ARCHIVE + “typing you didn’t do”
+if (goId === "office_doc_continuity" && !s.flags._pc_moment_continuity_once) {
+  s.flags._pc_moment_continuity_once = true;
+
+  const { x, y } = this.pcGetDesktopIconXY("ARCHIVE");
+  this.pcMomentCursorHijackTo(x + 24, y + 10, 1100);
+  this.startPcGlitch(900, 1.6);
+
+  this.time.delayedCall(520, () => {
+    this.pcMomentTerminalBurst([
+      "C:\\Users\\You> type confession.txt",
+      "I OPENED IT",
+      "I SAW IT",
+      "I LET IT IN",
+      "",
+      "C:\\Users\\You> _"
+    ], "Windows Terminal");
+  });
+}
+
+// E) Incident log => fake “system fault” + recovery bar
+if (goId === "office_doc_incident" && !s.flags._pc_moment_incident_once) {
+  s.flags._pc_moment_incident_once = true;
+
+  this.pcMomentError({
+    title: "SYSTEM FAULT",
+    variant: "error",
+    message: [
+      "A problem has been detected and Windows has been shut down to prevent damage.",
+      "",
+      "Collecting data…"
+    ],
+    buttons: [{ label: "OK", action: "close" }]
+  });
+
+  this.time.delayedCall(480, () => {
+    this.pcMomentProgress({
+      title: "RECOVERY",
+      label: "Restoring session…",
+      ms: 2200,
+      onDone: () => this.pcMomentToast("Session restored.", { variant: "info", autoCloseMs: 1200 })
     });
+  });
+}
+
+// F) Sublevel CSV => “exporting…” then “permission changed” + cursor snap
+if (goId === "office_doc_sublevel" && !s.flags._pc_moment_sublevel_once) {
+  s.flags._pc_moment_sublevel_once = true;
+
+  this.pcMomentProgress({
+    title: "EXPORT",
+    label: "Exporting SUBLEVEL_ACCESS.csv…",
+    ms: 2000,
+    onDone: () => {
+      this.pcMomentError({
+        title: "PERMISSION CHANGED",
+        variant: "warn",
+        message: [
+          "Your permissions changed while the file was open.",
+          "",
+          "This action has been recorded."
+        ],
+      });
+
+      // snap the cursor into the corner like it’s being “pulled away”
+      this.pcMomentCursorHijackTo(this.scale.width * 0.93, this.scale.height * 0.18, 900);
+      this.startPcGlitch(700, 1.3);
+    }
+  });
+}
+
+// G) Recycle readme => small haunting popup
+if (goId === "office_pc_recycle_readme" && !s.flags._pc_moment_recycle_once) {
+  s.flags._pc_moment_recycle_once = true;
+  this.pcMomentToast("The workstation noticed you.", { title: "SYSTEM", variant: "warn", autoCloseMs: 1800 });
+}
+
+  // ---------- FOLDERS ----------
+  if (ic.icon === "folder") {
+    // Folder opens: either switch desktops, or open folder contents in a window
+    if (nextUI?.type === "desktop") {
+      this.renderPcDesktop(nextUI);
+      return;
+    }
+
+    // Folder content window (text)
+    let lines = null;
+
+    if (Array.isArray(nextUI?.lines)) lines = nextUI.lines;
+    else if (Array.isArray(nextUI?.message)) lines = nextUI.message;
+    else if (typeof nextUI === "string") lines = [nextUI];
+
+    if (!lines) lines = ["(empty folder)"];
+
+    this.openPcModal(lines, { title: ic.label ?? "FOLDER" });
+    return;
+  }
+
+  // ---------- FILES ----------
+  // Files open in OS windows, do NOT change desktop
+  let lines = null;
+  let title = ic.label ?? "FILE";
+
+  if (Array.isArray(nextUI?.lines)) {
+    lines = nextUI.lines;
+  } else if (Array.isArray(nextUI?.message)) {
+    lines = nextUI.message;
+    title = nextUI.title ?? "SYSTEM MESSAGE";
+  } else if (typeof nextUI === "string") {
+    lines = [nextUI];
+  } else if (nextUI?.title && Array.isArray(nextUI?.content)) {
+    // optional future format: { title, content: [] }
+    lines = nextUI.content;
+    title = nextUI.title;
+  } else {
+    lines = ["(file has no content)"];
+  }
+
+  this.openPcModal(lines, { title });
+});
 
     layer.add([sprite, label]);
     this.pcUI.icons.push(sprite);
   });
 
-  // show desktop
   this.pcUI.desktopLayer.setVisible(true);
 }
 
@@ -1085,6 +2057,91 @@ showPcError(message) {
   this.pcUI.terminalText.setText(String(message));
 }
 
+openPcModal(linesOrText, opts = {}) {
+  if (!this.pcUI?.winMan) return;
+
+  const text = Array.isArray(linesOrText) ? linesOrText.join("\n") : String(linesOrText);
+
+  const title = opts.title ?? "FILE";
+  const id = opts.id; // optional fixed id if you want “same window” behavior
+
+  this.pcUI.winMan.createTextWindow({
+    id,
+    title,
+    lines: text.split("\n"),
+    w: opts.w ?? 760,
+    h: opts.h ?? 460,
+    x: opts.x,
+    y: opts.y,
+    onClose: opts.onClose
+  });
+}
+
+openPcErrorDialog(messageLines, opts = {}) {
+  if (!this.pcUI?.winMan) return;
+
+  const variant = opts.variant || "error"; // error | warn | info
+  const title = opts.title || (variant === "warn" ? "WARNING" : variant === "info" ? "NOTICE" : "ERROR");
+
+  const message = Array.isArray(messageLines)
+    ? messageLines
+    : String(messageLines || "").split("\n");
+
+  const buttons = opts.buttons || [{ label: "OK", action: "close" }];
+
+  const id = opts.id; // optional fixed id
+
+  this.pcUI.winMan.createErrorWindow({
+    id,
+    title,
+    variant,
+    message,
+    buttons,
+    w: opts.w || 620,
+    h: opts.h || 300,
+    x: opts.x,
+    y: opts.y,
+  });
+}
+
+// OS-style tiny popups that stack
+openPcToast(text, opts = {}) {
+  if (!this.pcUI?.winMan) return;
+
+  const id = `toast_${Date.now()}_${Math.floor(Math.random() * 9999)}`;
+  const x = opts.x ?? (this.scale.width - 520);
+  const y = opts.y ?? Phaser.Math.Between(140, this.scale.height - 260);
+
+  const win = this.pcUI.winMan.createErrorWindow({
+    id,
+    title: opts.title || "SYSTEM",
+    variant: opts.variant || "info",
+    message: Array.isArray(text) ? text : [String(text)],
+    buttons: opts.buttons || [{ label: "OK", action: "close" }],
+    w: opts.w || 480,
+    h: opts.h || 220,
+    x,
+    y,
+    onClose: opts.onClose
+  });
+
+  // auto-close option
+  if (opts.autoCloseMs) {
+    this.time.delayedCall(opts.autoCloseMs, () => {
+      try { this.pcUI?.winMan?.closeWindow?.(id); } catch {}
+    });
+  }
+
+  return win;
+}
+
+closePcModal() {
+  if (!this.pcUI) return;
+  this.pcUI.modal.setVisible(false);
+  this.pcUI.modalText?.setVisible(false).setText("");
+  this.pcUI.modalClose?.setVisible(false);
+}
+
 hidePcError() {
   if (!this.pcUI) return;
   // no-op unless you build a real modal
@@ -1154,7 +2211,7 @@ renderPcButtons(ui) {
   let startX = x + 24;
 
   buttons.forEach((b, i) => {
-    const t = this.add.text(startX + i * 140, startY, `[ ${b.label} ]`, {
+    const t = this.add.text(startX + i * 160, startY, `[ ${b.label} ]`, {
       fontFamily: "monospace",
       fontSize: "18px",
       color: "#dfe7ff",
@@ -1165,14 +2222,187 @@ renderPcButtons(ui) {
     .setInteractive({ useHandCursor: true });
 
     t.on("pointerdown", () => {
-      const state = this.registry.get("state");
-      if (b.go) {
-        state.nodeId = b.go;
-        this.renderNode();
-      }
-    });
+  const state = this.registry.get("state");
+
+  if (b.action) {
+    this.applyAction({ action: b.action, data: b.data || {} });
+    return;
+  }
+
+  if (b.go) {
+    const target = NODES[b.go];
+    if (!target) return;
+
+    try { target.onEnter?.(state); } catch {}
+    const ui = (typeof target.computerUI === "function")
+      ? target.computerUI(state)
+      : target.computerUI;
+
+    this.enterPcMode(ui);
+    this.renderPcButtons(ui);
+  }
+});
+
 
     this.pcUI.btns.push(t);
+  });
+}
+
+startPcGlitch(ms = 900, strength = 1) {
+  if (!this.pcMode || !this.pcUI) return;
+
+  const now = this.time.now;
+  this._pcCursorHijack = true;
+  this._pcCursorHijackUntil = now + ms;
+
+  // ---- Cursor hijack: drift & snap ----
+  // Every 80–140ms, move cursor target somewhere "wrong"
+  if (this._pcHijackTimer) this._pcHijackTimer.remove(false);
+
+  this._pcHijackTimer = this.time.addEvent({
+    delay: Phaser.Math.Between(80, 140),
+    loop: true,
+    callback: () => {
+      if (!this.pcMode) return;
+      if (this.time.now > this._pcCursorHijackUntil) return;
+
+      const w = this.scale.width;
+      const h = this.scale.height;
+
+      // bias toward the window content area
+      const x = Phaser.Math.Between(Math.floor(w * 0.18), Math.floor(w * 0.82));
+      const y = Phaser.Math.Between(Math.floor(h * 0.18), Math.floor(h * 0.78));
+
+      // "snap" target
+      this._pcCursorTarget.x = x;
+      this._pcCursorTarget.y = y;
+    }
+  });
+
+  // ---- Visual glitch overlay ----
+  this.enablePcGlitchOverlay();
+
+  // window jitter (subtle OS shake)
+  const root = this.pcUI.root;
+  this.tweens.add({
+    targets: root,
+    x: { from: 0, to: Phaser.Math.Between(-3, 3) * strength },
+    y: { from: 0, to: Phaser.Math.Between(-2, 2) * strength },
+    duration: 70,
+    yoyo: true,
+    repeat: Math.floor(6 * strength),
+    ease: "Sine.inOut",
+  });
+
+  // Stop after duration
+  this.time.delayedCall(ms, () => this.stopPcGlitch());
+}
+
+stopPcGlitch() {
+  this._pcCursorHijack = false;
+
+  if (this._pcHijackTimer) {
+    this._pcHijackTimer.remove(false);
+    this._pcHijackTimer = null;
+  }
+
+  // fade glitch overlays out
+  if (this.pcUI?.glitchGroup) {
+    this.tweens.add({
+      targets: this.pcUI.glitchGroup,
+      alpha: 0,
+      duration: 180,
+      onComplete: () => {
+        if (this.pcUI?.glitchGroup) {
+          this.pcUI.glitchGroup.destroy(true);
+          this.pcUI.glitchGroup = null;
+        }
+      }
+    });
+  }
+}
+
+enablePcGlitchOverlay() {
+  if (!this.pcUI || this.pcUI.glitchGroup) return;
+
+  const { width, height } = this.scale;
+
+  // group on top of everything
+  const g = this.add.container(0, 0).setDepth(19999).setAlpha(1);
+
+  // scanlines texture (generated)
+  if (!this.textures.exists("pc_scanlines")) {
+    const gfx = this.make.graphics({ x: 0, y: 0, add: false });
+    gfx.clear();
+    for (let y = 0; y < 64; y += 2) {
+      gfx.fillStyle(0x000000, 0.10);
+      gfx.fillRect(0, y, 256, 1);
+    }
+    gfx.generateTexture("pc_scanlines", 256, 64);
+    gfx.destroy();
+  }
+
+  // noise texture (generated once, we’ll tween alpha)
+  if (!this.textures.exists("pc_noise")) {
+    const gfx = this.make.graphics({ x: 0, y: 0, add: false });
+    gfx.clear();
+    for (let i = 0; i < 1400; i++) {
+      const x = Phaser.Math.Between(0, 255);
+      const y = Phaser.Math.Between(0, 255);
+      const a = Phaser.Math.FloatBetween(0.02, 0.12);
+      gfx.fillStyle(0xffffff, a);
+      gfx.fillRect(x, y, 1, 1);
+    }
+    gfx.generateTexture("pc_noise", 256, 256);
+    gfx.destroy();
+  }
+
+  const scan = this.add.tileSprite(0, 0, width, height, "pc_scanlines")
+    .setOrigin(0)
+    .setAlpha(0.0);
+
+  const noise = this.add.tileSprite(0, 0, width, height, "pc_noise")
+    .setOrigin(0)
+    .setAlpha(0.0)
+    .setBlendMode(Phaser.BlendModes.ADD);
+
+  // RGB split effect: duplicate the root into tinted “ghosts”
+  const r = this.add.rectangle(width / 2, height / 2, width, height, 0xff0000, 0.02).setAlpha(0);
+  const b = this.add.rectangle(width / 2, height / 2, width, height, 0x00aaff, 0.02).setAlpha(0);
+
+  g.add([scan, noise, r, b]);
+  this.pcUI.glitchGroup = g;
+
+  // animate overlays
+  this.tweens.add({
+    targets: scan,
+    alpha: { from: 0.0, to: 0.18 },
+    duration: 120,
+    yoyo: true,
+    repeat: 5,
+  });
+
+  this.tweens.add({
+    targets: noise,
+    alpha: { from: 0.0, to: 0.16 },
+    duration: 90,
+    yoyo: true,
+    repeat: 9,
+  });
+
+  // jitter the tiles
+  this.time.addEvent({
+    delay: 60,
+    repeat: 18,
+    callback: () => {
+      if (!noise.active) return;
+      noise.tilePositionX += Phaser.Math.Between(-40, 40);
+      noise.tilePositionY += Phaser.Math.Between(-40, 40);
+      scan.tilePositionY += Phaser.Math.Between(2, 6);
+
+      r.setAlpha(Phaser.Math.FloatBetween(0.0, 0.12));
+      b.setAlpha(Phaser.Math.FloatBetween(0.0, 0.10));
+    }
   });
 }
 
@@ -1196,6 +2426,11 @@ const nextNodeId = state.nodeId;
 
 const prevNode = prevNodeId ? NODES[prevNodeId] : null;
 const node = NODES[nextNodeId];
+
+// ⛔ Prevent PC mode from re-entering on same node
+if (this.pcMode && this._lastNodeId === nextNodeId) {
+  return;
+}
 
 const entering = prevNodeId !== nextNodeId;
 
@@ -1299,6 +2534,12 @@ if (enteringNode && this._deathFxNodeId && this._deathFxNodeId !== nowNodeId) {
 
 // if we entered a death node, trigger once
 if (enteringNode && this.isDeathNode(nowNodeId)) {
+  // 🩸 First-death awareness (loop anchor)
+state.flags = state.flags || {};
+if (!state.flags.first_death_seen) {
+  state.flags.first_death_seen = true;
+  state.flags.loop_awareness = true;
+}
   // Don’t double-stack FX on quick rerenders
   if (this._deathFxNodeId !== nowNodeId) {
     this._deathFxNodeId = nowNodeId;
@@ -1536,7 +2777,11 @@ if (
     return;
   }
 
-  if (choice.action) this.applyAction(choice);
+  if (choice.action) {
+  const handled = this.applyAction(choice);
+  // If the action fully handled UI/navigation, stop here.
+  if (handled === true) return;
+}
 
   // ✅ If no navigation was specified, rerender once to reflect state changes
   if (!choice.go && !choice.goScene) {
@@ -1560,6 +2805,34 @@ if (
   const data = choice.data || {};
 
   switch (choice.action) {
+    case "enterPCMode": {
+  // Open PC overlay without changing story nodeId
+  const targetId = data.nodeId; // e.g. "office_pc"
+  if (!targetId) {
+    console.warn("enterPCMode missing data.nodeId");
+    return true;
+  }
+
+  const pcNode = NODES[targetId];
+  if (!pcNode) {
+    console.warn("enterPCMode missing node:", targetId);
+    return true;
+  }
+
+  const ui = (typeof pcNode.computerUI === "function")
+    ? pcNode.computerUI(state)
+    : pcNode.computerUI;
+
+  this.hideStoryUI();
+  this.enterPcMode(ui);
+
+  // ✅ remember which PC node we're "viewing" inside the overlay (optional)
+  state.flags = state.flags || {};
+  state.flags.pc_last = targetId;
+
+  return true; // IMPORTANT: prevents choose() from calling renderNode()
+}
+
     case "travelDowntown":
   state.locationId = "downtown";
 
@@ -1641,7 +2914,13 @@ case "openPC": {
 case "closePC": {
   state.flags = state.flags || {};
   state.flags.pc_closed_once = true;
-  break;
+
+  // Actually close overlay and return to story
+  this.exitPcMode(true);
+  this.showStoryUI();
+  this.renderNode();
+
+  return true;
 }
 
 case "setFlag":
@@ -1709,6 +2988,7 @@ case "stareMirror": {
   if (eligibleForDemon && Math.random() < DEMON_CHANCE) {
     state.flags.mirrorVariant = "demon";
     state.flags.mirror_demon_started = true;
+    state.flags.mirror_demon_hold = 2; // ✅ IMPORTANT: demon lasts briefly
 
     // sanity drop once on flip
     state.maxSanity = state.maxSanity ?? 10;
@@ -1730,15 +3010,20 @@ case "stareMirror": {
   break;
 }
 
-case "resetMirrorVisit":
-  delete state.flags.mirrorVariant;
-  delete state.flags.mirror_wrong_counted_this_visit;
-  delete state.flags.mirror_demon_started;
+case "resetMirrorVisit": {
+  state.flags = state.flags || {};
 
-  // ✅ reset sanity guards for next visit
-  delete state.flags.mirror_sanity_hit_wrong;
-  delete state.flags.mirror_sanity_hit_demon;
+  // reset what you SEE on next visit
+  state.flags.mirrorVariant = "normal";
+  delete state.flags.mirror_demon_hold;
+
+  // allow wrong/demon to roll again next visit
+  delete state.flags._wrong_counted_this_visit;
+  delete state.flags.mirror_wrong_counted_this_visit;
+  delete state.flags.mirror_demon_started; // optional: lets demon roll again later
+
   break;
+}
 
       case "advance":
   state.beat = Math.max(state.beat ?? 0, data.beat ?? (state.beat ?? 0) + 1);
@@ -1805,4 +3090,21 @@ case "resetMirrorVisit":
       }
     }
   }
+  update(time, delta) {
+  if (!this.pcMode || !this.pcUI?.cursor) return;
+
+  const cur = this._pcCursorPos;
+  const tgt = this._pcCursorTarget;
+
+  // smooth movement to feel like OS cursor inertia
+  const s = Math.min(1, delta / 16);
+  const lerp = 0.35 * s;
+
+  cur.x += (tgt.x - cur.x) * lerp;
+  cur.y += (tgt.y - cur.y) * lerp;
+
+  this.pcUI.cursor.setPosition(cur.x, cur.y);
 }
+}
+
+
