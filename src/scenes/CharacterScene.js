@@ -8,15 +8,20 @@ export default class CharacterScene extends Phaser.Scene {
     const h = this.scale.height;
     const s = this.registry.get("state");
 
-    this.add.rectangle(0, 0, w, h, 0x000000, 0.65)
+    // Dark backdrop (click to close)
+    this.add
+      .rectangle(0, 0, w, h, 0x000000, 0.65)
       .setOrigin(0, 0)
-      .setInteractive();
+      .setInteractive({ useHandCursor: true })
+      .on("pointerdown", () => this.scene.stop());
 
-    this.add.text(w / 2, 40, "Character", {
-      fontFamily: "monospace",
-      fontSize: "26px",
-      color: "#ffffff",
-    }).setOrigin(0.5);
+    this.add
+      .text(w / 2, 40, "Character", {
+        fontFamily: "monospace",
+        fontSize: "26px",
+        color: "#ffffff",
+      })
+      .setOrigin(0.5);
 
     const lines = [
       `Level: ${s.level}`,
@@ -36,18 +41,14 @@ export default class CharacterScene extends Phaser.Scene {
       lineSpacing: 6,
     });
 
-    const close = this.add.text(w - 100, h - 50, "[ESC] Close", {
-      fontFamily: "monospace",
-      fontSize: "16px",
-      color: "#ffffff",
-    }).setInteractive();
+    const close = this.add
+      .text(w - 120, h - 50, "[Close]", {
+        fontFamily: "monospace",
+        fontSize: "16px",
+        color: "#ffffff",
+      })
+      .setInteractive({ useHandCursor: true });
 
     close.on("pointerdown", () => this.scene.stop());
-    this.input.keyboard.once("keydown-ESC", () => this.scene.stop());
-
-    this.events.once("shutdown", () => {
-      this.scene.resume("StoryScene");
-      this.scene.bringToTop("UIScene");
-    });
   }
 }

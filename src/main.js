@@ -17,10 +17,13 @@ const config = {
   backgroundColor: "#0b0b0f",
 
   scale: {
-    mode: Phaser.Scale.ENVELOP,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
-    fullscreenTarget: "game",
-  },
+  // PC-first: always show the whole 16:9 game without cropping
+  mode: Phaser.Scale.FIT,
+  autoCenter: Phaser.Scale.CENTER_BOTH,
+
+  // For Electron / desktop fullscreen toggles
+  fullscreenTarget: "game",
+},
 
   scene: [
     BootScene,

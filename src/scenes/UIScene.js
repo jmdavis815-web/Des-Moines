@@ -1,6 +1,7 @@
 export default class UIScene extends Phaser.Scene {
   constructor() {
     super("UIScene");
+
     this.timer = null;
     this.keys = null;
 
@@ -12,6 +13,31 @@ export default class UIScene extends Phaser.Scene {
     this.btnInv = null;
     this.btnMap = null;
     this.btnPause = null;
+
+    this._onResize = null;
+
+    // cached state helpers for quick save/load
+    this._stateApi = null;   // { saveToSlot, loadFromSlot }
+    this._stateApiLoading = false;
+  }
+
+  async _getStateApi() {
+    if (this._stateApi) return this._stateApi;
+    if (this._stateApiLoading) return null;
+
+    this._stateApiLoading = true;
+    try {
+      // IMPORTANT: path must match where UIScene.js lives relative to state.js
+      // If UIScene.js is in /scenes, change to "../state.js"
+      const mod = await import("../state.js");
+      this._stateApi = { saveToSlot: mod.saveToSlot, loadFromSlot: mod.loadFromSlot };
+      return this._stateApi;
+    } catch (e) {
+      console.warn("UIScene: could not import state.js for quick save/load:", e);
+      return null;
+    } finally {
+      this._stateApiLoading = false;
+    }
   }
 
   create() {
@@ -24,13 +50,18 @@ export default class UIScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(1);
 
-    const baseStyle = { fontFamily: "monospace", fontSize: "16px", color: "#ffffff" };
+    const baseStyle = {
+      fontFamily: "monospace",
+      fontSize: "16px",
+      color: "#ffffff",
+    };
+
     this.txtHP = this.add.text(16, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
     this.txtSan = this.add.text(150, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
     this.txtCash = this.add.text(300, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
     this.txtXP = this.add.text(450, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
 
-    // Buttons (CREATE ONCE)
+    // ---- BUTTON FACTORY ----
     const makeBtn = (x, label, onClick) => {
       const t = this.add
         .text(x, 10, label, {
@@ -48,87 +79,236 @@ export default class UIScene extends Phaser.Scene {
       return t;
     };
 
-    this.btnInv = makeBtn(w - 260, "[I] Inventory", () => this.toggleModal("InventoryScene"));
-    this.btnMap = makeBtn(w - 140, "[M] Map", () => this.toggleModal("MapScene"));
-    this.btnPause = makeBtn(w - 52, "[P]", () => this.toggleModal("PauseMenuScene"));
+    this.btnInv   = makeBtn(w - 300, "[I] Inventory", () => this.toggleModal("InventoryScene"));
+    this.btnMap   = makeBtn(w - 170, "[M] Map", () => this.toggleModal("MapScene"));
+    this.btnPause = makeBtn(w - 60,  "[P]", () => this.toggleModal("PauseMenuScene"));
 
-    // Hotkeys
+    // ---- HOTKEYS ----
     this.keys = this.input.keyboard.addKeys({
-  I: Phaser.Input.Keyboard.KeyCodes.I,
-  E: Phaser.Input.Keyboard.KeyCodes.E,
-  C: Phaser.Input.Keyboard.KeyCodes.C,
-  M: Phaser.Input.Keyboard.KeyCodes.M,
-  P: Phaser.Input.Keyboard.KeyCodes.P,
-  ESC: Phaser.Input.Keyboard.KeyCodes.ESC,
-});
+      I: Phaser.Input.Keyboard.KeyCodes.I,
+      M: Phaser.Input.Keyboard.KeyCodes.M,
+      P: Phaser.Input.Keyboard.KeyCodes.P,
+      E: Phaser.Input.Keyboard.KeyCodes.E,
+      C: Phaser.Input.Keyboard.KeyCodes.C,
+      ESC: Phaser.Input.Keyboard.KeyCodes.ESC,
 
+      // PC extras
+      F11: Phaser.Input.Keyboard.KeyCodes.F11,
+      ONE: Phaser.Input.Keyboard.KeyCodes.ONE,
+      TWO: Phaser.Input.Keyboard.KeyCodes.TWO,
+      THREE: Phaser.Input.Keyboard.KeyCodes.THREE,
+      TAB: Phaser.Input.Keyboard.KeyCodes.TAB,
+    });
+
+    // Core modal hotkeys
     this.keys.I.on("down", () => this.toggleModal("InventoryScene"));
     this.keys.M.on("down", () => this.toggleModal("MapScene"));
     this.keys.P.on("down", () => this.toggleModal("PauseMenuScene"));
     this.keys.E.on("down", () => this.toggleModal("EquipmentScene"));
     this.keys.C.on("down", () => this.toggleModal("CharacterScene"));
 
-    // ESC closes top modal first
+    // ---- FULLSCREEN (PC) ----
+    this.keys.F11.on("down", () => {
+      if (this.scale.isFullscreen) this.scale.stopFullscreen();
+      else this.scale.startFullscreen();
+    });
+
+    // ---- QUICK SAVE / LOAD (PC) ----
+    // Ctrl+S = quicksave Slot 1
+    this.input.keyboard.on("keydown-S", async (ev) => {
+      if (!ev.ctrlKey) return;
+      ev.preventDefault();
+
+      const state = this.registry.get("state");
+      if (!state) return;
+
+      const api = await this._getStateApi();
+      if (!api?.saveToSlot) return;
+
+      try {
+        api.saveToSlot(0, state);
+        // Optional tiny feedback: flash cash text
+        this.txtCash.setAlpha(0.4);
+        this.time.delayedCall(120, () => this.txtCash.setAlpha(1));
+      } catch (e) {
+        console.warn("Quicksave failed:", e);
+      }
+    });
+
+    const quickLoad = async (slotIndex) => {
+      const api = await this._getStateApi();
+      if (!api?.loadFromSlot) return;
+
+      try {
+        const loaded = api.loadFromSlot(slotIndex);
+        if (!loaded) return;
+
+        this.registry.set("state", loaded);
+
+        const story = this.scene.get("StoryScene");
+        story?.renderNode?.();
+
+        this.refresh();
+      } catch (e) {
+        console.warn("Quickload failed:", e);
+      }
+    };
+
+    this.keys.ONE.on("down", () => quickLoad(0));
+    this.keys.TWO.on("down", () => quickLoad(1));
+    this.keys.THREE.on("down", () => quickLoad(2));
+
+    // ---- HUD TOGGLE (cinematic) ----
+    this.keys.TAB.on("down", () => {
+      const visible = this.hudBg.visible;
+      const next = !visible;
+
+      this.hudBg.setVisible(next);
+      this.txtHP.setVisible(next);
+      this.txtSan.setVisible(next);
+      this.txtCash.setVisible(next);
+      this.txtXP.setVisible(next);
+      this.btnInv.setVisible(next);
+      this.btnMap.setVisible(next);
+      this.btnPause.setVisible(next);
+    });
+
+    // ---- ESC PRIORITY CLOSE ----
+    // IMPORTANT: Only resume StoryScene when *no* modals remain open.
     this.keys.ESC.on("down", () => {
-      if (this.scene.isActive("InventoryScene")) {
-        this.scene.stop("InventoryScene");
-        this.scene.resume("StoryScene");
-        return;
-      }
-      if (this.scene.isActive("MapScene")) {
-        this.scene.stop("MapScene");
-        this.scene.resume("StoryScene");
-        return;
-      }
-      if (this.scene.isActive("PauseMenuScene")) {
-        this.scene.stop("PauseMenuScene");
-        this.scene.resume("StoryScene");
-        return;
-      }
+      const order = [
+        "InventoryScene",
+        "ShopScene",        // PC-friendly (optional)
+        "MapScene",
+        "EquipmentScene",
+        "CharacterScene",
+        "PauseMenuScene",
+      ];
+
+      for (const key of order) {
+  if (this.scene.isActive(key)) {
+    if (key === "MapScene") {
+      const map = this.scene.get("MapScene");
+      if (map?.closeMap) { map.closeMap(); return; }
+    }
+
+    this.scene.stop(key);
+    this._resumeStoryIfNoModals();
+    return;
+  }
+}
+
+      // nothing open → open pause menu
       this.toggleModal("PauseMenuScene");
     });
 
-    // Resize: reposition, don’t recreate
-    this.scale.on("resize", (gameSize) => {
+    // ---- RESIZE ----
+    this._onResize = (gameSize) => {
       const ww = gameSize.width;
+
       this.hudBg.width = ww;
       this.hudBg.x = ww / 2;
 
-      this.btnInv.x = ww - 260;
-      this.btnMap.x = ww - 140;
-      this.btnPause.x = ww - 52;
-    });
+      this.btnInv.x = ww - 300;
+      this.btnMap.x = ww - 170;
+      this.btnPause.x = ww - 60;
+    };
 
-    // HUD refresh (lightweight)
+    this.scale.on("resize", this._onResize);
+
+    // ---- HUD REFRESH ----
     this.timer = this.time.addEvent({
       delay: 100,
       loop: true,
       callback: () => this.refresh(),
     });
 
+    // CLEANUP
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       try { this.timer?.remove?.(); } catch {}
-      try { this.keys?.I?.removeAllListeners?.(); } catch {}
-      try { this.keys?.M?.removeAllListeners?.(); } catch {}
-      try { this.keys?.P?.removeAllListeners?.(); } catch {}
-      try { this.keys?.ESC?.removeAllListeners?.(); } catch {}
+
+      try {
+        if (this._onResize) this.scale.off("resize", this._onResize);
+      } catch {}
+
+      try {
+        this.input.keyboard.removeAllListeners();
+      } catch {}
+
+      Object.values(this.keys || {}).forEach(k => {
+        try { k.removeAllListeners(); } catch {}
+      });
     });
 
     this.refresh();
   }
 
-  toggleModal(key) {
-    const isModal = (k) => k === "InventoryScene" || k === "MapScene" || k === "PauseMenuScene";
+  _resumeStoryIfNoModals() {
+    const MODALS = [
+      "InventoryScene",
+      "ShopScene",
+      "MapScene",
+      "PauseMenuScene",
+      "EquipmentScene",
+      "CharacterScene",
+    ];
 
-    if (this.scene.isActive(key)) {
-      this.scene.stop(key);
-      if (isModal(key)) this.scene.resume("StoryScene");
+    const anyOpen = MODALS.some(k => this.scene.isActive(k));
+    if (!anyOpen) {
+      if (this.scene.isPaused("StoryScene")) this.scene.resume("StoryScene");
+      this.scene.bringToTop("UIScene");
+    }
+  }
+
+  // ---- MODAL TOGGLING ----
+  toggleModal(key) {
+    const MODALS = new Set([
+      "InventoryScene",
+      "ShopScene",
+      "MapScene",
+      "PauseMenuScene",
+      "EquipmentScene",
+      "CharacterScene",
+    ]);
+
+    // close if already open
+if (this.scene.isActive(key)) {
+  // ✅ If we're closing the map, use MapScene's own close routine
+  if (key === "MapScene") {
+    const map = this.scene.get("MapScene");
+    if (map?.closeMap) {
+      map.closeMap();
       return;
     }
+  }
 
-    if (isModal(key)) this.scene.pause("StoryScene");
-    this.scene.launch(key);
-    this.scene.bringToTop("UIScene");
+  this.scene.stop(key);
+  this._resumeStoryIfNoModals();
+  return;
+}
+
+    // close all other modals first
+    MODALS.forEach(k => {
+      if (k !== key && this.scene.isActive(k)) {
+        this.scene.stop(k);
+      }
+    });
+
+    // pause story + launch
+if (!this.scene.isPaused("StoryScene")) this.scene.pause("StoryScene");
+
+if (key === "MapScene") {
+  this.scene.launch("MapScene", { view: "city" });
+} else {
+  this.scene.launch(key);
+}
+
+// ✅ Put the modal above everything so it receives clicks
+this.scene.bringToTop(key);
+
+// (optional) keep HUD visible but NOT on top while modals are open
+// this.scene.bringToTop("UIScene");
+
   }
 
   refresh() {

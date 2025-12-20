@@ -8,6 +8,20 @@ function tvNewsKey(state) {
   return "tv_news_0";
 }
 
+const TOTAL_EVIDENCE = 6;
+
+function evidenceCount(state) {
+  const f = state.flags || {};
+  return [
+    f.ev_police_tape,
+    f.ev_budget_doc,
+    f.ev_keycard,
+    f.ev_staffer_audio,
+    f.ev_capitol_sigils,
+    f.ev_work_pc_archive,
+  ].filter(Boolean).length;
+}
+
 function wakeNode(state) {
   return state?.flags?.first_death_seen ? "intro_morning" : "intro_game";
 }
@@ -67,17 +81,6 @@ function withBackground(locationKey, override = {}) {
     ...(LOCATION_BACKGROUNDS[locationKey] || {}),
     ...override,
   });
-}
-
-function evidenceCount(state) {
-  const f = state.flags || {};
-  return [
-    f.ev_police_tape,
-    f.ev_budget_doc,
-    f.ev_keycard,
-    f.ev_staffer_audio,
-    f.ev_capitol_sigils,
-  ].filter(Boolean).length;
 }
 
 function requireEvidence(min, passNode, failNode) {
@@ -155,7 +158,6 @@ export function tvInit(state) {
   state.flags.tv_seen = state.flags.tv_seen || {};
   state.flags.tv_story_index = state.flags.tv_story_index ?? 0;
   state.flags.tv_current_story_id = state.flags.tv_current_story_id ?? null;
-  state.flags.evidence_count = state.flags.evidence_count ?? 0;
 }
 
 export function tvNextStory(state) {
@@ -328,13 +330,13 @@ first_death_after_work: {
   apartment_tv: {
   title: "Television",
   meta: (state) => {
-    tvInit(state);
+  tvInit(state);
 
-    const seenCount = Object.keys(state.flags.tv_seen || {}).length;
-    const ev = state.flags.evidence_count ?? 0;
+  const seenCount = Object.keys(state.flags.tv_seen || {}).length;
+  const ev = evidenceCount(state);
 
-    return `Local news.  Stories watched: ${seenCount}/${TV_STORIES.length}  |  Evidence: ${ev}`;
-  },
+  return `Local news. Stories watched: ${seenCount}/${TV_STORIES.length} | Evidence: ${ev}/${TOTAL_EVIDENCE}`;
+},
 
   tension: 0.55,
 
@@ -343,20 +345,18 @@ first_death_after_work: {
   light: "tv_light",
   glow: "tv_glow",
 
-  // ✅ draw your “slanted TV screen overlay” as SCREEN layer, not FG
   screen: tvNewsKey(state),
   screenX: 0.23,
   screenY: 0.62,
   screenScale: 0.34,
   screenRot: -0.035,
-  screenBlend: "SCREEN",
-  screenAlpha: 0.95,
 
-  // ✅ this should be the full-scene foreground (room edges etc)
   fg: "tv_fg",
-
-  // ✅ IMPORTANT: don’t drift the TV scene background
-  disableDrift: true,
+  fgX: 0.23,
+  fgY: 0.62,
+  fgScale: 0.34,
+  fgRot: -0.035,
+  lockFg: true,
 }),
 
   text: (state) => {
@@ -455,18 +455,26 @@ first_death_after_work: {
   meta: "The light hums softly.",
   tension: 0.65,
 
- backgroundLayers: (state) => {
-  const v = state.flags.mirrorVariant ?? "normal";
+  backgroundLayers: (state) => {
+    const v = state.flags?.mirrorVariant ?? "normal";
 
-  return {
-    bg:
-      v === "demon"
-        ? "apartment_mirror_demon"
-        : v === "wrong"
-        ? "apartment_mirror_wrong"
-        : "apartment_mirror",
-  };
-},
+    return {
+      // ✅ always keep these consistent so the scene doesn't "pop"
+      light: "apartment_light",
+      glow: "apartment_glow",
+
+      // optional: if you have a bathroom fg, use it; otherwise omit
+      // fg: "apartment_fg",
+
+      // ✅ variant bg swap only
+      bg:
+        v === "demon"
+          ? "apartment_mirror_demon"
+          : v === "wrong"
+          ? "apartment_mirror_wrong"
+          : "apartment_mirror",
+    };
+  },
 
   text: (state) => {
     const count = state.flags.mirror_stare_count ?? 0;
@@ -600,6 +608,7 @@ first_death_after_work: {
     { label: "Apologize with charm", check: { stat: "charm", dc: 3 }, onPass: "boss_laugh", onFail: "boss_marks_you" },
     { label: "Bite your tongue", go: "boss_marks_you" },
     { label: "Go grab coffee", go: "coffee_stop" },
+    { label: "Check the breakroom bulletin", go: "office_breakroom_board" },
   ],
   loot: { chance: 0.2, table: ["lucky_coin"] },
 },
@@ -776,7 +785,7 @@ downtown_arrival: {
     "Not approaching. Not leaving.",
     "Just… looping.",
     "",
-    `Evidence collected: ${evidenceCount(state)}/5`,
+    `Evidence collected: ${evidenceCount(state)}/${TOTAL_EVIDENCE}`,
   ],
   choices: [
     { label: "Check public records", go: "public_records" },
@@ -1130,7 +1139,7 @@ connect_the_dots: {
       "It isn’t one incident.",
       "It’s an infrastructure.",
       "",
-      `Evidence collected: ${n}/5`,
+      `Evidence collected: ${evidenceCount(state)}/${TOTAL_EVIDENCE}`,
       "",
     ];
 
@@ -1168,7 +1177,6 @@ connect_the_dots: {
       ];
     }
     return [
-      { label: "Back", go: "intro_morning" },
       { label: "Return downtown", go: "downtown_arrival" },
       { label: "Check public records", go: "public_records" },
       { label: "Go to the statehouse bar", go: "staffer_bar" },
@@ -1803,5 +1811,528 @@ final_death: {
 
   choices: (state) => [{ label: "Wake up", go: wakeNode(state) }],
 },
+
+
+  // ============================
+  // HAUNTED WORK COMPUTER ARC
+  // ============================
+
+  office_breakroom_board: {
+    title: "Breakroom Bulletin",
+    meta: "Paper notices curl at the corners. Someone taped over something they shouldn’t have.",
+    tension: 0.45,
+    backgroundLayers: withBackground("office"),
+    onEnter: (state) => {
+      state.flags = state.flags || {};
+      state.flags.knows_about_work_computer = true;
+    },
+    text: (state) => [
+      "Among the birthday flyers and mandatory training reminders, one note stands out —",
+      "a printed email thread that someone ripped down and taped back up crooked.",
+      "",
+      "Subject: `ARCHIVE MACHINE — DO NOT REIMAGE`",
+      "",
+      "A line is highlighted in yellow:",
+      "`If anyone asks, the workstation is gone. It was never here.`",
+      "",
+      "Someone wrote beneath it in pen:",
+      "`IT locked it in the back office. It keeps turning itself back on.`",
+      "",
+      "You swallow.",
+      "This is where they hid what you need.",
+    ],
+    choices: [
+      { label: "Wait until after hours", go: "office_after_hours_entry" },
+      { label: "Go back to your desk", go: "office_arrival" },
+    ],
+  },
+
+  office_after_hours_entry: {
+    title: "After Hours",
+    meta: "The building empties. The lights don’t.",
+    tension: 0.68,
+    backgroundLayers: withBackground("office"),
+    text: (state) => [
+      "You stay late until the last voices fade down the hallway.",
+      "",
+      "Somewhere deeper in the office, a monitor flickers once —",
+      "like it’s breathing.",
+      "",
+      "The note said it was locked away.",
+      "The note also said it kept turning itself on.",
+    ],
+    choices: [
+      { label: "Sneak to the back office", check: { stat: "wits", dc: 3 }, onPass: "office_back_office", onFail: "office_caught_noise" },
+      { label: "Leave while you still can", go: "office_arrival" },
+    ],
+  },
+
+  office_caught_noise: {
+    title: "Close Call",
+    meta: "A door clicks. Footsteps stop.",
+    tension: 0.78,
+    backgroundLayers: withBackground("office"),
+    text: () => [
+      "A sound — small, stupid — betrays you.",
+      "",
+      "Footsteps pause in the hall.",
+      "A shadow passes under the door.",
+      "",
+      "You hold your breath so hard it hurts.",
+      "",
+      "After a long minute, the footsteps move on.",
+      "But the building feels like it noticed you.",
+    ],
+    choices: [
+      { label: "Try again", go: "office_after_hours_entry" },
+      { label: "Abort (for now)", go: "office_arrival" },
+    ],
+  },
+
+  office_back_office: {
+    title: "Back Office",
+    meta: "A cramped room of old hardware and sealed boxes. One monitor is already awake.",
+    tension: 0.82,
+    backgroundLayers: withBackground("office"),
+    text: (state) => [
+      "The lock is cheaper than you expected.",
+      "The door gives with a soft, reluctant pop.",
+      "",
+      "Inside: spare keyboards, a dusty printer, and a workstation shoved under a shelf.",
+      "",
+      "The monitor is already on.",
+      "Not bright — just awake.",
+      "",
+      "On the desk: a sticky note with a single word:",
+      "`ARCHIVE`",
+      "",
+      "Your hands hover over the mouse.",
+      "You can feel the room listening.",
+    ],
+    choices: [
+      { label: "Sit down at the computer", go: "workpc_desktop" },
+      { label: "Back out slowly", go: "office_after_hours_entry" },
+    ],
+  },
+
+  // --- COMPUTER MODE: desktop ---
+  workpc_desktop: {
+  title: "",
+  meta: "",
+  tension: 0.9,
+  backgroundLayers: withBackground("office"),
+  uiMode: "computer",
+
+  // ✅ make desktop dynamic
+  computerUI: (state) => {
+    state.flags = state.flags || {};
+
+    const del = state.flags.workpc_delete_attempts ?? 0;
+    const sawErr = !!state.flags.workpc_error_seen;
+    const notesSeen = !!state.flags.workpc_notes_seen;
+
+    // ARCHIVE path:
+    // - if already opened: go to open archive desktop
+    // - else if guard removed (del>=3): open archive
+    // - else if saw error: show stronger warning
+    // - else: first error
+    let archiveGo = "workpc_error_1";
+    if (state.flags.ev_work_pc_archive) archiveGo = "workpc_archive_open";
+    else if (del >= 3) archiveGo = "workpc_archive_open";
+    else if (sawErr) archiveGo = "workpc_error_2";
+
+    return {
+      type: "desktop",
+      wallpaperText: notesSeen ? "ARCHIVE WORKSTATION // WATCHING" : "ARCHIVE WORKSTATION",
+      hint: notesSeen
+        ? "It read you back."
+        : "Double-click ARCHIVE. The guard program watches.",
+
+      icons: [
+        { key: "ARCHIVE", label: "ARCHIVE", go: archiveGo },
+        { key: "SYS_GUARD", label: "SYS_GUARD.exe", go: "workpc_guard_about" },
+        { key: "NOTES", label: "NOTES.txt", go: "workpc_notes" },     // ✅ NEW
+        { key: "RECYCLE", label: "Recycle Bin", go: "workpc_recycle" },
+      ],
+    };
+  },
+
+  text: () => [],
+  choices: [
+    { label: "Step away from the computer", go: "office_back_office" },
+  ],
+},
+
+workpc_notes: {
+  title: "",
+  meta: "",
+  tension: 0.96,
+  backgroundLayers: withBackground("office"),
+  uiMode: "computer",
+  onEnter: (state) => {
+    state.flags = state.flags || {};
+    state.flags.workpc_notes_seen = true; // ✅ this is what StoryScene will use to haunt
+  },
+  computerUI: {
+    type: "error",
+    title: "NOTES.TXT",
+    message: [
+      "IF YOU ARE READING THIS,",
+      "IT ALREADY KNOWS YOU ARE HERE.",
+      "",
+      "DO NOT TRUST THE CLOCK.",
+      "DO NOT TRUST THE TV.",
+      "",
+      "THE ARCHIVE IS A DOOR.",
+      "SYS_GUARD IS NOT A PROGRAM.",
+      "",
+      "If the cursor moves by itself —",
+      "do not fight it.",
+    ],
+    buttons: [
+      { label: "OK", go: "workpc_desktop" },
+    ],
+  },
+  text: () => [],
+},
+
+workpc_error_details: {
+  title: "",
+  meta: "",
+  tension: 0.99,
+  backgroundLayers: withBackground("office"),
+  uiMode: "computer",
+  computerUI: {
+    type: "error",
+    title: "ERROR DETAILS",
+    message: [
+      "EXCEPTION: SEAL_BREACH_ATTEMPT",
+      "MODULE: SYS_GUARD",
+      "",
+      "STACK TRACE:",
+      "  at ARCHIVE.open()",
+      "  at USER.curiosity()",
+      "  at LOOP.correct()",
+      "",
+      "STATUS: CONTAINMENT PENDING",
+      "",
+      "Message:",
+      "\"Stop touching the edge of the world.\"",
+    ],
+    buttons: [
+      { label: "Back", go: "workpc_error_2" },
+      { label: "Try anyway", go: "workpc_dos_boot" },
+    ],
+  },
+  text: () => [],
+},
+
+  workpc_recycle: {
+  title: "",
+  meta: "",
+  tension: 0.88,
+  backgroundLayers: withBackground("office"),
+  uiMode: "computer",
+  computerUI: (state) => {
+    state.flags = state.flags || {};
+    const del = state.flags.workpc_delete_attempts ?? 0;
+    const sawErr = !!state.flags.workpc_error_seen;
+
+    let archiveGo = "workpc_error_1";
+    if (state.flags.ev_work_pc_archive) archiveGo = "workpc_archive_open";
+    else if (del >= 3) archiveGo = "workpc_archive_open";
+    else if (sawErr) archiveGo = "workpc_error_2";
+
+    return {
+      type: "desktop",
+      wallpaperText: "RECYCLE BIN",
+      hint: "Empty. Like someone already cleaned it.",
+      icons: [
+        { key: "ARCHIVE", label: "ARCHIVE", go: archiveGo },
+        { key: "SYS_GUARD", label: "SYS_GUARD.exe", go: "workpc_guard_about" },
+        { key: "NOTES", label: "NOTES.txt", go: "workpc_notes" }, // ✅ NEW
+      ],
+    };
+  },
+  text: () => [],
+  choices: [{ label: "Back", go: "workpc_desktop" }],
+},
+
+  workpc_guard_about: {
+    title: "",
+    meta: "",
+    tension: 0.92,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    computerUI: {
+      type: "error",
+      title: "System Protection",
+      message: [
+        "SYS_GUARD.exe is running.",
+        "",
+        "This workstation is monitored.",
+        "Unauthorized access will be logged.",
+      ],
+      buttons: [{ label: "OK", go: "workpc_desktop" }],
+    },
+    text: () => [],
+  },
+
+  // --- “Real looking” error modal ---
+  workpc_error_1: {
+    title: "",
+    meta: "",
+    tension: 0.95,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    onEnter: (state) => {
+      state.flags = state.flags || {};
+      state.flags.workpc_error_seen = true;
+    },
+    computerUI: {
+      type: "error",
+      title: "CRITICAL SYSTEM ERROR",
+      message: [
+        "This operation is not permitted.",
+        "The file is currently in use.",
+        "",
+        "If you continue, you may damage your system.",
+      ],
+      buttons: [
+  { label: "OK", go: "workpc_error_2" },
+  { label: "Details", go: "workpc_error_details" }, // ✅ NEW
+],
+    },
+    text: () => [],
+  },
+
+  workpc_error_2: {
+    title: "",
+    meta: "",
+    tension: 0.98,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    computerUI: {
+      type: "error",
+      title: "ACCESS DENIED",
+      message: [
+        "DO NOT PROCEED.",
+        "",
+        "You were not supposed to see this.",
+      ],
+      buttons: [
+  { label: "Try anyway", go: "workpc_dos_boot" },
+  { label: "Details", go: "workpc_error_details" }, // ✅ NEW
+  { label: "Back to desktop", go: "workpc_desktop" },
+],
+    },
+    text: () => [],
+  },
+
+  // --- DOS mode: typing horror + persistence ---
+  workpc_dos_boot: {
+    title: "",
+    meta: "",
+    tension: 1.0,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    onEnter: (state) => {
+      state.flags = state.flags || {};
+      state.flags.workpc_delete_attempts = state.flags.workpc_delete_attempts ?? 0;
+    },
+    computerUI: {
+      type: "dos",
+       input: "typed", // ✅ ADD
+      lines: [
+        "C:\\>DIR",
+        "VOLUME IN DRIVE C HAS NO NAME",
+        "DIRECTORY OF C:\\",
+        "",
+        "ARCHIVE        <DIR>     02-14-1999",
+        "SYS_GUARD.EXE            10-31-2009",
+        "",
+        "C:\\>REM YOU SHOULD NOT BE HERE",
+        "C:\\>",
+      ],
+      prompt: "C:\\>",
+    },
+    text: () => [],
+    choices: [
+      { label: "DEL SYS_GUARD.EXE", action: "incFlag", data: { flag: "workpc_delete_attempts", by: 1 }, go: "workpc_dos_try_delete" },
+      { label: "EXIT", go: "workpc_dos_exit" },
+      { label: "SHUTDOWN", go: "workpc_dos_shutdown" },
+    ],
+  },
+
+  workpc_dos_exit: {
+    title: "",
+    meta: "",
+    tension: 0.98,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    computerUI: {
+      type: "dos",
+      lines: [
+        "C:\\>EXIT",
+        "ACCESS DENIED",
+        "",
+        "C:\\>REM NO",
+        "C:\\>",
+      ],
+      prompt: "C:\\>",
+    },
+    text: () => [],
+    choices: [
+      { label: "DEL SYS_GUARD.EXE", action: "incFlag", data: { flag: "workpc_delete_attempts", by: 1 }, go: "workpc_dos_try_delete" },
+      { label: "Back", go: "workpc_dos_boot" },
+    ],
+  },
+
+  workpc_dos_shutdown: {
+    title: "",
+    meta: "",
+    tension: 1.0,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    computerUI: {
+      type: "dos",
+      lines: [
+        "C:\\>SHUTDOWN /S",
+        "",
+        "REMEMBER:",
+        "YOU BROUGHT ME HOME.",
+      ],
+      prompt: "",
+    },
+    text: () => [],
+    choices: [
+      { label: "Pull your hands away (too late)", go: "death_end_of_day" },
+    ],
+  },
+
+  workpc_dos_try_delete: {
+    title: "",
+    meta: "",
+    tension: 1.0,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    text: () => [],
+    computerUI: (state) => {
+      const n = state.flags?.workpc_delete_attempts ?? 0;
+
+      // Success at 3+ attempts (persistence)
+      if (n >= 3) {
+        return {
+          type: "dos",
+          lines: [
+            "C:\\>DEL SYS_GUARD.EXE",
+            "DELETING...",
+            "",
+            "FILE REMOVED",
+            "",
+            "C:\\>REM ...",
+            "C:\\>",
+          ],
+          prompt: "C:\\>",
+        };
+      }
+
+      // Escalating taunts
+      const taunts = [
+        "ACCESS DENIED — FILE IN USE",
+        "REM YOU CANNOT DELETE WHAT REMEMBERS YOU",
+        "REM WHY ARE YOU DOING THIS",
+        "REM YOU WERE NOT SUPPOSED TO SEE",
+        "REM I KEPT IT SAFE",
+      ];
+
+      const t = taunts[Math.min(taunts.length - 1, n)];
+
+      return {
+        type: "dos",
+        lines: [
+          "C:\\>DEL SYS_GUARD.EXE",
+          t,
+          "",
+          "C:\\>",
+        ],
+        prompt: "C:\\>",
+      };
+    },
+    choices: (state) => {
+      const n = state.flags?.workpc_delete_attempts ?? 0;
+
+      if (n >= 3) {
+        return [
+          { label: "Open ARCHIVE", go: "workpc_archive_open" },
+          { label: "Back to desktop", go: "workpc_desktop" },
+        ];
+      }
+
+      return [
+        { label: "Try again", action: "incFlag", data: { flag: "workpc_delete_attempts", by: 1 }, go: "workpc_dos_try_delete" },
+        { label: "Back to desktop", go: "workpc_desktop" },
+      ];
+    },
+  },
+
+  workpc_archive_open: {
+    title: "",
+    meta: "",
+    tension: 0.92,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    onEnter: (state) => {
+  state.flags = state.flags || {};
+
+  // ✅ this is what evidenceCount() now counts
+  state.flags.ev_work_pc_archive = true;
+
+  // Optional unlocks
+  state.flags.unlocked_map = true;
+  state.flags.unlock_downtown = true;
+
+  // keep TV-only counter if you want it, but don't pretend it's the main gate:
+},
+    computerUI: {
+      type: "desktop",
+      wallpaperText: "ARCHIVE OPEN",
+      hint: "Files spill out like someone exhaled.",
+      icons: [
+        { key: "LOGS", label: "access_logs.csv", go: "workpc_evidence_read" },
+        { key: "MAIL", label: "unsent_email.msg", go: "workpc_evidence_read" },
+        { key: "VID", label: "camera_export.mp4", go: "workpc_evidence_read" },
+      ],
+    },
+    text: () => [],
+    choices: [
+      { label: "Leave before the building notices", go: "office_back_office" },
+    ],
+  },
+
+  workpc_evidence_read: {
+    title: "",
+    meta: "",
+    tension: 0.85,
+    backgroundLayers: withBackground("office"),
+    uiMode: "computer",
+    computerUI: {
+      type: "error",
+      title: "ARCHIVE CONTENTS",
+      message: [
+        "The timestamps don’t match the official report.",
+        "",
+        "Names repeat. Doors open that never should.",
+        "",
+        "Someone inside the system moved you like a piece.",
+        "",
+        "Now you have proof.",
+      ],
+      buttons: [
+        { label: "OK", go: "workpc_archive_open" },
+      ],
+    },
+    text: () => [],
+  },
 
 };

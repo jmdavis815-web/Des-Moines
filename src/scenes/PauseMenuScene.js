@@ -1,28 +1,46 @@
 import { saveToSlot, loadFromSlot } from "../state.js";
 
 export default class PauseMenuScene extends Phaser.Scene {
-  constructor() { super("PauseMenuScene"); }
+  constructor() {
+    super("PauseMenuScene");
+  }
 
   create() {
     const { width, height } = this.scale;
 
-    this.add.rectangle(0, 0, width, height, 0x000000, 0.7).setOrigin(0);
+    // Dim backdrop (click to close)
+    this.add
+      .rectangle(0, 0, width, height, 0x000000, 0.7)
+      .setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on("pointerdown", () => this.scene.stop());
 
-    const panel = this.add.rectangle(width/2, height/2, 560, 480, 0x121218, 0.97);
-    panel.setStrokeStyle(2, 0x444455, 1);
+    // Panel
+    const panel = this.add
+      .rectangle(width / 2, height / 2, 560, 480, 0x121218, 0.97)
+      .setStrokeStyle(2, 0x444455, 1)
+      .setDepth(1);
 
-    this.add.text(width/2 - 230, height/2 - 210, "Menu", {
-      fontFamily: "monospace",
-      fontSize: "24px",
-      color: "#ffffff",
-    });
+    // Prevent backdrop clicks from closing when clicking the panel
+    panel.setInteractive();
+
+    this.add
+      .text(width / 2 - 230, height / 2 - 210, "Menu", {
+        fontFamily: "monospace",
+        fontSize: "24px",
+        color: "#ffffff",
+      })
+      .setDepth(2);
 
     const makeBtn = (y, label, onClick) => {
-      const t = this.add.text(width/2 - 230, y, `> ${label}`, {
-        fontFamily: "monospace",
-        fontSize: "20px",
-        color: "#ffffff",
-      }).setInteractive({ useHandCursor: true });
+      const t = this.add
+        .text(width / 2 - 230, y, `> ${label}`, {
+          fontFamily: "monospace",
+          fontSize: "20px",
+          color: "#ffffff",
+        })
+        .setDepth(2)
+        .setInteractive({ useHandCursor: true });
 
       t.on("pointerdown", onClick);
       t.on("pointerover", () => t.setColor("#ffd7a8"));
@@ -30,7 +48,7 @@ export default class PauseMenuScene extends Phaser.Scene {
       return t;
     };
 
-    let y = height/2 - 150;
+    let y = height / 2 - 150;
 
     makeBtn(y, "Resume", () => this.scene.stop()); y += 40;
 
@@ -44,19 +62,20 @@ export default class PauseMenuScene extends Phaser.Scene {
 
     makeBtn(y, "Quit to Main Menu", () => this.quitToMenu()); y += 40;
 
-    this.msg = this.add.text(width/2 - 230, height/2 + 205, "", {
-      fontFamily: "monospace",
-      fontSize: "16px",
-      color: "#cfcfcf",
-      wordWrap: { width: 460 },
-    });
-
-    this.input.keyboard.on("keydown-ESC", () => this.scene.stop());
+    this.msg = this.add
+      .text(width / 2 - 230, height / 2 + 205, "", {
+        fontFamily: "monospace",
+        fontSize: "16px",
+        color: "#cfcfcf",
+        wordWrap: { width: 460 },
+      })
+      .setDepth(2);
   }
 
   doSave(slotIndex) {
     const state = this.registry.get("state");
     if (!state) return;
+
     saveToSlot(slotIndex, state);
     this.msg.setText(`Saved to Slot ${slotIndex + 1}.`);
   }
@@ -70,7 +89,7 @@ export default class PauseMenuScene extends Phaser.Scene {
 
     this.registry.set("state", loaded);
 
-    // Re-render
+    // Re-render story + HUD
     const story = this.scene.get("StoryScene");
     story?.renderNode?.();
 
