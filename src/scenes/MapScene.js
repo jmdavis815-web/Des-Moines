@@ -48,6 +48,24 @@ export default class MapScene extends Phaser.Scene {
     }
   }
 
+  playUiClick(vol = 0.28) {
+  if (this.sound && this.cache?.audio?.exists("ui_click")) {
+    try { this.sound.play("ui_click", { volume: vol }); } catch {}
+  }
+}
+
+playUiWhoosh(vol = 0.18) {
+  if (this.sound && this.cache?.audio?.exists("ui_whoosh")) {
+    try { this.sound.play("ui_whoosh", { volume: vol }); } catch {}
+  }
+}
+
+playUiType(vol = 0.08) {
+  if (this.sound && this.cache?.audio?.exists("ui_type")) {
+    try { this.sound.play("ui_type", { volume: vol }); } catch {}
+  }
+}
+
   create() {
     const { width, height } = this.scale;
     const state = this.registry.get("state");
@@ -56,13 +74,29 @@ export default class MapScene extends Phaser.Scene {
     // (Safe even if it wasn't paused.)
     try { this.scene.pause("StoryScene"); } catch {}
 
+    // Ensure audio is unlocked for this scene (safe no-op if already unlocked)
+const unlockAudio = () => {
+  try { this.sound?.context?.resume?.(); } catch {}
+};
+this.input.once("pointerdown", unlockAudio);
+this.input.keyboard?.once("keydown", unlockAudio);
+
     // Backdrop (click to close)
     this.backdrop = this.add
       .rectangle(0, 0, width, height, 0x000000, 0.78)
       .setOrigin(0, 0)
       .setDepth(0)
       .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => this.closeMap());
+      .on("pointerdown", () => {
+  this.playUiClick(0.22);
+  this.playUiWhoosh(0.14);
+  this.closeMap();
+});
+
+this.time.delayedCall(120, () => this.playUiType(0.06));
+this.time.delayedCall(240, () => this.playUiType(0.06));
+this.time.delayedCall(360, () => this.playUiType(0.06));
+
 
     // --- PHONE MAP ---
     const cx = width / 2;
@@ -117,17 +151,21 @@ export default class MapScene extends Phaser.Scene {
       { fontFamily: "monospace", fontSize: "16px", color: "#cfcfcf" }
     ).setDepth(20);
 
-    // Close button
-    const close = this.add.text(width - 40, 34, "[X]", {
-      fontFamily: "monospace",
-      fontSize: "22px",
-      color: "#fff",
-    })
-    .setDepth(20)
-    .setOrigin(1, 0)
-    .setInteractive({ useHandCursor: true });
+   // Close button
+const close = this.add.text(width - 40, 34, "[X]", {
+  fontFamily: "monospace",
+  fontSize: "22px",
+  color: "#fff",
+})
+  .setDepth(20)
+  .setOrigin(1, 0)
+  .setInteractive({ useHandCursor: true });
 
-    close.on("pointerdown", () => this.closeMap());
+close.on("pointerdown", () => {
+  this.playUiClick(0.28);
+  this.playUiWhoosh(0.16);
+  this.closeMap();
+});
 
     // --- CITY MARKERS ---
     if (this.view === "city") {
@@ -170,12 +208,15 @@ export default class MapScene extends Phaser.Scene {
 
           marker.setInteractive({ useHandCursor: true });
           marker.on("pointerdown", () => {
-            state.locationId = loc.id;
-            state.localId = loc.locals?.[0] || null;
+  this.playUiClick(0.32);
+  this.playUiWhoosh(0.18);
 
-            // ✅ stay in MapScene, switch view cleanly
-            this.scene.restart({ view: "local" });
-          });
+  state.locationId = loc.id;
+  state.localId = loc.locals?.[0] || null;
+
+  // ✅ stay in MapScene, switch view cleanly
+  this.scene.restart({ view: "local" });
+});
         }
       });
     }

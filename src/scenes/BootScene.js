@@ -19,6 +19,7 @@ this.load.on("filecomplete", (key, type, data) => {
     this.load.image("apartment_fg", "assets/backgrounds/apartment/fg.png");
     this.load.image("apartment_light", "assets/backgrounds/apartment/light.png");
     this.load.image("apartment_glow", "assets/backgrounds/apartment/glow.png");
+    this.load.image("couch_bg", "assets/backgrounds/apartment/couch_bg.png");
     this.load.image(
   "apartment_mirror",
   "assets/backgrounds/apartment/apartment_mirror.png"
@@ -118,6 +119,9 @@ this.load.audio(
   "assets/audio/demon-laugh.mp3"
 );
   this.load.audio("death_scream", "assets/audio/death_scream.mp3");
+  this.load.audio("ui_click",  "assets/audio/ui/click.mp3");
+this.load.audio("ui_type",   "assets/audio/ui/tick.mp3");
+this.load.audio("ui_whoosh", "assets/audio/ui/whoosh.mp3");
 
 
 

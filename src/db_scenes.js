@@ -765,7 +765,7 @@ apartment_couch: {
   tension: 0.30,
 
   backgroundLayers: () => ({
-    bg: "apartment_bg",
+    bg: "couch_bg",
     light: "apartment_light",
     glow: "apartment_glow",
     fg: "apartment_fg",

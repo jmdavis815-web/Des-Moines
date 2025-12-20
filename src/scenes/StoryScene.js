@@ -22,6 +22,17 @@ this.pcLines = [];
 this.pcIndex = 0;
 this.pcTerror = null;     // terror runtime state
 this._pcTerrorTimer = null;
+// --- TRANSITIONS / TYPEWRITER / UI SFX ---
+this.isTransitioning = false;
+this._typingEvent = null;
+this._typingFast = false;
+
+this.uiSfx = {
+  click: null,
+  type: null,
+  whoosh: null,
+};
+
 }
 
 clearBleedSprites() {
@@ -33,8 +44,13 @@ clearBleedSprites() {
 
   create() {
     console.log("StoryScene LOADED ✅ (ghost build A)");
-
-
+    
+    const click = () => {
+  if (this.cache.audio.exists("ui_click")) {
+    this.sound.play("ui_click", { volume: 0.35 });
+  }
+};
+    
     const { width } = this.scale;
     this.ambient = startAmbientMusic(this);
 
@@ -309,6 +325,213 @@ if (this._screenMaskGfx) {
   try { this._screenMaskGfx.destroy(); } catch {}
   this._screenMaskGfx = null;
 }
+}
+
+ensureUiSfx() {
+  // only create once (safe if called many times)
+  if (!this.uiSfx) this.uiSfx = {};
+
+  if (!this.uiSfx.click && this.sound.get("ui_click")) this.uiSfx.click = this.sound.get("ui_click");
+  if (!this.uiSfx.type  && this.sound.get("ui_type"))  this.uiSfx.type  = this.sound.get("ui_type");
+  if (!this.uiSfx.whoosh && this.sound.get("ui_whoosh")) this.uiSfx.whoosh = this.sound.get("ui_whoosh");
+}
+
+playUiClick(vol = 0.35) {
+  this.ensureUiSfx();
+  // allow if loaded; if not loaded, just do nothing (no crash)
+  if (this.sound && this.sound.get("ui_click")) this.sound.play("ui_click", { volume: vol });
+}
+
+playUiTypeTick(vol = 0.12) {
+  this.ensureUiSfx();
+  if (this.sound && this.sound.get("ui_type")) this.sound.play("ui_type", { volume: vol });
+}
+
+playUiWhoosh(vol = 0.25) {
+  this.ensureUiSfx();
+  if (this.sound && this.sound.get("ui_whoosh")) this.sound.play("ui_whoosh", { volume: vol });
+}
+
+getStoryUiTargets() {
+  // these exist in your create() already :contentReference[oaicite:2]{index=2}
+  const t = [this.titleText, this.metaText, this.bodyText].filter(Boolean);
+  // choices are text objects you create each render
+  (this.choiceTexts || []).forEach(c => c && t.push(c));
+  return t;
+}
+
+getBgTargets() {
+  // bgGroup is a Phaser group; we fade its children
+  const kids = [];
+  try {
+    this.bgGroup?.getChildren?.().forEach(k => k && kids.push(k));
+  } catch {}
+  return kids;
+}
+
+fadeTargets(targets, toAlpha, duration = 450) {
+  if (!targets || !targets.length) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    this.tweens.add({
+      targets,
+      alpha: toAlpha,
+      duration,
+      ease: "Sine.inOut",
+      onComplete: resolve
+    });
+  });
+}
+
+stopStoryTyping() {
+  if (this._typingEvent) {
+    try { this._typingEvent.remove(false); } catch {}
+    this._typingEvent = null;
+  }
+  this._typingFast = false;
+}
+
+typeTextWordByWord(textObj, fullText, opts = {}) {
+  this.stopStoryTyping();
+
+  const baseDelay = opts.baseDelay ?? 40;     // speed per token (word or whitespace)
+  const wordDelay = opts.wordDelay ?? 55;     // extra per word
+  const punctDelay = opts.punctDelay ?? 120;  // extra after punctuation
+  const newlineDelay = opts.newlineDelay ?? 180;
+  const tickEvery = opts.tickEvery ?? 2;      // play type tick every N words
+  const tickVolume = opts.tickVolume ?? 0.10;
+
+  const tokens = String(fullText).split(/(\s+)/); // keeps spaces/newlines tokens
+  let out = "";
+  let i = 0;
+  let wordCount = 0;
+
+  // set blank first
+  textObj.setText("");
+
+  // Allow click to “finish instantly”
+  const finishNow = () => { this._typingFast = true; };
+  this.input.once("pointerdown", finishNow);
+  this.input.keyboard?.once("keydown", finishNow);
+
+  const ev = this.time.addEvent({
+    delay: baseDelay,
+    loop: true,
+    callback: () => {
+      if (!textObj || !textObj.active) { ev.remove(false); return; }
+
+      // If user clicked, dump remaining instantly
+      if (this._typingFast) {
+        out = tokens.join("");
+        textObj.setText(out);
+        ev.remove(false);
+        this._typingEvent = null;
+        this._typingFast = false;
+        return;
+      }
+
+      if (i >= tokens.length) {
+        ev.remove(false);
+        this._typingEvent = null;
+        return;
+      }
+
+      const tok = tokens[i++];
+      out += tok;
+      textObj.setText(out);
+
+      // Detect word vs whitespace
+      const isWhitespace = /^\s+$/.test(tok);
+
+      if (!isWhitespace) {
+        wordCount++;
+
+        // light type tick sometimes
+        if (tickEvery > 0 && wordCount % tickEvery === 0) {
+          this.playUiTypeTick(tickVolume);
+        }
+
+        // add extra pauses after punctuation
+        const lastChar = tok.slice(-1);
+        if (/[.!?]/.test(lastChar)) {
+          ev.delay = baseDelay + punctDelay;
+        } else if (/[,:;]/.test(lastChar)) {
+          ev.delay = baseDelay + Math.floor(punctDelay * 0.5);
+        } else {
+          ev.delay = baseDelay + wordDelay;
+        }
+      } else {
+        // whitespace token
+        if (tok.includes("\n")) ev.delay = baseDelay + newlineDelay;
+        else ev.delay = baseDelay;
+      }
+    }
+  });
+
+  this._typingEvent = ev;
+  return ev;
+}
+
+async transitionToNode(nextNodeId) {
+  if (this.isTransitioning) return;
+  this.isTransitioning = true;
+
+  try {
+    const state = this.registry.get("state");
+    state.nodeId = nextNodeId;
+
+    this.stopStoryTyping();
+    this.playUiClick(0.25);
+    this.playUiWhoosh(0.18);
+
+    await this.fadeTargets(this.getStoryUiTargets(), 0, 260);
+    await this.fadeTargets(this.getBgTargets(), 0, 420);
+
+    this.renderNode({ skipFadeIn: true, skipTyping: true });
+
+    await this.fadeTargets(this.getBgTargets(), 1, 520);
+    await this.fadeTargets(this.getStoryUiTargets(), 1, 320);
+
+    this.typeCurrentNodeText();
+  } finally {
+    this.isTransitioning = false;
+  }
+}
+
+typeCurrentNodeText() {
+  const state = this.registry.get("state");
+  const node = NODES[state.nodeId];
+  if (!node) return;
+
+  // Build the strings exactly like you already do when rendering
+  const title = node.title || "";
+  const meta  = node.meta || "";
+
+  // node.text can be function returning array of lines
+  let lines = [];
+  try {
+    const raw = (typeof node.text === "function") ? node.text(state) : node.text;
+    lines = Array.isArray(raw) ? raw : [String(raw ?? "")];
+  } catch (e) {
+    lines = ["(something went wrong)"];
+  }
+
+  const body = lines.join("\n");
+
+  // Clear first
+  this.titleText.setText("");
+  this.metaText.setText("");
+  this.bodyText.setText("");
+
+  // Title + meta slightly faster, body slower
+  this.typeTextWordByWord(this.titleText, title, { baseDelay: 20, wordDelay: 30, tickEvery: 0 });
+  this.time.delayedCall(120, () => {
+    this.typeTextWordByWord(this.metaText, meta, { baseDelay: 18, wordDelay: 26, tickEvery: 0 });
+  });
+
+  this.time.delayedCall(260, () => {
+    this.typeTextWordByWord(this.bodyText, body, { baseDelay: 28, wordDelay: 45, punctDelay: 140, tickEvery: 2 });
+  });
 }
 
   // ---------- BACKGROUND RENDERING ----------
@@ -862,6 +1085,7 @@ if (!this._pcPointerMoveBound) {
   .setInteractive();
 
   exitBtn.on("pointerdown", () => {
+    click();
     this.applyAction({ action: "closePC", data: {} });
   });
 
@@ -2470,109 +2694,91 @@ enablePcGlitchOverlay() {
   });
 }
 
-  renderNode() {
-
-    // HARD RESET visual layers between nodes
-this.clearBleedSprites?.();
-
-// HARD RESET visual layers between nodes
-this.killBackgroundTweens?.();
-this.destroyBgSprites?.();
+  renderNode(opts = {}) {
+  const {
+    skipFadeIn = false,
+    skipTyping = false
+  } = opts;
 
   const state = this.registry.get("state");
 
   state.flags = state.flags || {};
-state.maxSanity = state.maxSanity ?? 10;
-state.sanity = state.sanity ?? state.maxSanity; // ensure sanity exists
+  state.maxSanity = state.maxSanity ?? 10;
+  state.sanity = state.sanity ?? state.maxSanity;
 
   const prevNodeId = this._lastNodeId;
-const nextNodeId = state.nodeId;
+  const nextNodeId = state.nodeId;
 
-const prevNode = prevNodeId ? NODES[prevNodeId] : null;
-const node = NODES[nextNodeId];
+  const prevNode = prevNodeId ? NODES[prevNodeId] : null;
+  const node = NODES[nextNodeId];
 
-// ⛔ Prevent PC mode from re-entering on same node
-if (this.pcMode && this._lastNodeId === nextNodeId) {
-  return;
-}
+  // ⛔ Prevent PC mode from re-entering on same node
+  if (this.pcMode && this._lastNodeId === nextNodeId) return;
 
-const entering = prevNodeId !== nextNodeId;
+  const entering = prevNodeId !== nextNodeId;
 
-// ✅ mark first-death (loop awareness hook)
-if (entering && nextNodeId === "death_first_time") {
-  state.flags.first_death_seen = true;
-}
-
-// ----------------------------
-// END-OF-DAY INEVITABILITY
-// No real clock. Counts steps.
-// ----------------------------
-const DAY_STEP_LIMIT = 18; // forced death at this step
-const WARNING_STEP = 16;   // warning hits at this step
-
-state.flags = state.flags || {};
-
-// reset the "day" counter when the loop resets
-if (entering && nextNodeId === "intro_game") {
-  state.flags.day_steps = 0;
-  state.flags.day_forced_death = false;
-  state.flags.day_warned = false;
-}
-
-// only count steps when entering a new node
-if (entering) {
-  const id = (nextNodeId || "").toLowerCase();
-
-  const exempt =
-    id === "intro_game" ||
-    id === "final_death" ||
-    id === "death_end_of_day" ||
-    id === "day_warning" ||
-    id.startsWith("death_") ||
-    id.startsWith("part1_") ||
-    id.includes("demon_realm");
-
-  if (!exempt) {
-    state.flags.day_steps = (state.flags.day_steps ?? 0) + 1;
+  // ✅ mark first-death (loop awareness hook)
+  if (entering && nextNodeId === "death_first_time") {
+    state.flags.first_death_seen = true;
   }
 
-  // 🔔 WARNING — one-time
-  if (!state.flags.day_warned && (state.flags.day_steps ?? 0) >= WARNING_STEP) {
-    state.flags.day_warned = true;
-    state.nodeId = "day_warning";
-    this._lastNodeId = null;
-    this.renderNode();
-    return;
+  // ----------------------------
+  // END-OF-DAY INEVITABILITY
+  // ----------------------------
+  const DAY_STEP_LIMIT = 18;
+  const WARNING_STEP = 16;
+
+  // reset the "day" counter when the loop resets
+  if (entering && nextNodeId === "intro_game") {
+    state.flags.day_steps = 0;
+    state.flags.day_forced_death = false;
+    state.flags.day_warned = false;
   }
 
-  // ☠️ Forced end-of-day death
-  if (!state.flags.day_forced_death && (state.flags.day_steps ?? 0) >= DAY_STEP_LIMIT) {
-    state.flags.day_forced_death = true;
-    state.nodeId = "death_end_of_day";
-    this._lastNodeId = null;
-    this.renderNode();
-    return;
+  if (entering) {
+    const id = (nextNodeId || "").toLowerCase();
+
+    const exempt =
+      id === "intro_game" ||
+      id === "final_death" ||
+      id === "death_end_of_day" ||
+      id === "day_warning" ||
+      id.startsWith("death_") ||
+      id.startsWith("part1_") ||
+      id.includes("demon_realm");
+
+    if (!exempt) {
+      state.flags.day_steps = (state.flags.day_steps ?? 0) + 1;
+    }
+
+    // warning
+    if (!state.flags.day_warned && (state.flags.day_steps ?? 0) >= WARNING_STEP) {
+      state.flags.day_warned = true;
+      state.nodeId = "day_warning";
+      this._lastNodeId = null;
+      this.renderNode(opts);
+      return;
+    }
+
+    // forced death
+    if (!state.flags.day_forced_death && (state.flags.day_steps ?? 0) >= DAY_STEP_LIMIT) {
+      state.flags.day_forced_death = true;
+      state.nodeId = "death_end_of_day";
+      this._lastNodeId = null;
+      this.renderNode(opts);
+      return;
+    }
   }
-}
-
-
 
   if (entering && prevNodeId === "apartment_mirror") {
-  this.jumpScarePlayed = false;
-  this.demonLaughPlayed = false; // 👈 add
-}
+    this.jumpScarePlayed = false;
+    this.demonLaughPlayed = false;
+  }
 
-  // If we’re entering the very first intro node, play thunder once
-if (entering && nextNodeId === "intro_game") {
-  this.playIntroThunderOnce();
-}
+  if (entering && nextNodeId === "intro_game") this.playIntroThunderOnce();
+  if (entering && prevNodeId === "intro_game" && nextNodeId !== "intro_game") this.stopIntroThunder();
 
-// If we are leaving intro_game to any other node, stop thunder if it’s still playing
-if (entering && prevNodeId === "intro_game" && nextNodeId !== "intro_game") {
-  this.stopIntroThunder();
-}
-
-  // Run exit/enter hooks exactly once on transition
+  // Run hooks once
   if (entering) {
     if (prevNode?.onExit) prevNode.onExit(state);
     if (node?.onEnter) node.onEnter(state);
@@ -2582,161 +2788,123 @@ if (entering && prevNodeId === "intro_game" && nextNodeId !== "intro_game") {
   this._lastNodeId = nextNodeId;
 
   // ----------------------------
-// DEATH FX (blood + cracks)
-// ----------------------------
-const nowNodeId = state.nodeId;
+  // DEATH FX
+  // ----------------------------
+  const nowNodeId = state.nodeId;
+  const enteringNode = prevNodeId !== nowNodeId;
 
-// entering a new node?
-const enteringNode = prevNodeId !== nowNodeId;
+  if (enteringNode && this._deathFxNodeId && this._deathFxNodeId !== nowNodeId) {
+    try { this.deathFx?.destroy?.(); } catch {}
+    this.deathFx = null;
+    this._deathFxNodeId = null;
+  }
 
-// if we left a death node, clean up overlays
-if (enteringNode && this._deathFxNodeId && this._deathFxNodeId !== nowNodeId) {
-  try { this.deathFx?.destroy?.(); } catch {}
-  this.deathFx = null;
-  this._deathFxNodeId = null;
-}
-
-// if we entered a death node, trigger once
-if (enteringNode && this.isDeathNode(nowNodeId)) {
-  // 🩸 First-death awareness (loop anchor)
-state.flags = state.flags || {};
-if (!state.flags.first_death_seen) {
-  state.flags.first_death_seen = true;
-  state.flags.loop_awareness = true;
-}
-  // Don’t double-stack FX on quick rerenders
-  if (this._deathFxNodeId !== nowNodeId) {
-    this._deathFxNodeId = nowNodeId;
-
-    const isCleanFailsafe =
-      !!state.flags?.failsafe_seen || nowNodeId === "final_death";
-
-    const isBigImpact =
-      nowNodeId === "apartment_demon_death" || nowNodeId === "death_end_of_day";
-
-    const crackChance = isCleanFailsafe ? 0.15 : (isBigImpact ? 0.9 : 0.6);
-
-    // ✅ Play death scream on non-clean deaths (only if loaded)
-if (!isCleanFailsafe) {
-  if (this.cache?.audio?.exists("death_scream")) {
-    try {
-      this.sound.play("death_scream", { volume: 0.85 });
-    } catch (e) {
-      console.warn("death_scream failed to play:", e);
+  if (enteringNode && this.isDeathNode(nowNodeId)) {
+    state.flags = state.flags || {};
+    if (!state.flags.first_death_seen) {
+      state.flags.first_death_seen = true;
+      state.flags.loop_awareness = true;
     }
-  } else {
-    console.warn("death_scream not loaded (check BootScene preload path)");
+
+    if (this._deathFxNodeId !== nowNodeId) {
+      this._deathFxNodeId = nowNodeId;
+
+      const isCleanFailsafe = !!state.flags?.failsafe_seen || nowNodeId === "final_death";
+      const isBigImpact = nowNodeId === "apartment_demon_death" || nowNodeId === "death_end_of_day";
+      const crackChance = isCleanFailsafe ? 0.15 : (isBigImpact ? 0.9 : 0.6);
+
+      if (!isCleanFailsafe) {
+        if (this.cache?.audio?.exists("death_scream")) {
+          try { this.sound.play("death_scream", { volume: 0.85 }); } catch {}
+        }
+      }
+
+      this.deathFx = playDeathFX(this, {
+        shakeDuration: 420,
+        shakeIntensity: isBigImpact ? 0.018 : 0.010,
+        vignetteAlpha: isCleanFailsafe ? 0.28 : 0.45,
+        baseAlpha: isCleanFailsafe ? 0.28 : 0.55,
+        fadeInMs: 160,
+        dripDelayMs: isCleanFailsafe ? 750 : 520,
+        minLayers: isCleanFailsafe ? 1 : 2,
+        maxLayers: isCleanFailsafe ? 2 : 4,
+        useMultiply: false,
+        crackChance,
+        crackAlpha: isCleanFailsafe ? 0.10 : (isBigImpact ? 0.35 : 0.22),
+        crackThickness: isBigImpact ? 3 : 2,
+        crackCount: isBigImpact ? 7 : 5,
+        autoCleanupMs: 0,
+      });
+    }
   }
-}
-
-    // ✅ Heavy old-school death look: blood + cracked glass
-    this.deathFx = playDeathFX(this, {
-  // camera punch
-  shakeDuration: 420,
-  shakeIntensity: isBigImpact ? 0.018 : 0.010,
-
-  // ✅ less dark vignette
-  vignetteAlpha: isCleanFailsafe ? 0.28 : 0.45,
-
-  // ✅ less blood darkness
-  baseAlpha: isCleanFailsafe ? 0.28 : 0.55,
-  fadeInMs: 160,
-  dripDelayMs: isCleanFailsafe ? 750 : 520,
-  minLayers: isCleanFailsafe ? 1 : 2,
-  maxLayers: isCleanFailsafe ? 2 : 4,
-
-  // ✅ IMPORTANT: Multiply is what “crushes” the scene darker
-  useMultiply: false,
-
-  // cracks still visible
-  crackChance,
-  crackAlpha: isCleanFailsafe ? 0.10 : (isBigImpact ? 0.35 : 0.22),
-  crackThickness: isBigImpact ? 3 : 2,
-  crackCount: isBigImpact ? 7 : 5,
-
-  autoCleanupMs: 0,
-});
-  }
-}
 
   if (!node) {
     this.bodyText.setText(`Missing node: ${state.nodeId}`);
     return;
   }
-  
-// PC MODE HANDLING
-const isComputer = node.uiMode === "computer";
 
-if (isComputer) {
-  const ui = typeof node.computerUI === "function"
-    ? node.computerUI(state)
-    : node.computerUI;
+  // ----------------------------
+  // PC MODE
+  // ----------------------------
+  const isComputer = node.uiMode === "computer";
+  if (isComputer) {
+    const ui = (typeof node.computerUI === "function") ? node.computerUI(state) : node.computerUI;
 
-  this.hideStoryUI();        // ✅ IMPORTANT
-  this.enterPcMode(ui);
+    this.hideStoryUI();
+    this.enterPcMode(ui);
 
-  if (!ui) {
-  this.typePcLines(["(NO UI DATA)"], 20);
-  this.renderPcButtons(null);              // ✅ clear buttons
-} else if (ui.type === "dos") {
-  this.typePcLines([...(ui.lines || []), "", ui.prompt || ""], 12);
-  this.renderPcButtons(ui);                // ✅ show DOS buttons if provided
-} else if (ui.type === "error") {
-  this.typePcLines([ui.title || "", "", ...(ui.message || [])], 18);
-  this.showPcError((ui.message || []).join("\n"));
-  this.renderPcButtons(ui);                // ✅ show OK / Back / Try anyway
-} else if (ui.type === "desktop") {
-  this.renderPcDesktop(ui);
-  this.renderPcButtons(null);              // ✅ desktop uses icons, not buttons
-} else {
-  this.typePcLines(ui.lines || ["(unknown ui.type)"], 18);
-  this.renderPcButtons(ui);                // ✅ in case you add buttons later
-} 
+    if (!ui) {
+      this.typePcLines(["(NO UI DATA)"], 20);
+      this.renderPcButtons(null);
+    } else if (ui.type === "dos") {
+      this.typePcLines([...(ui.lines || []), "", ui.prompt || ""], 12);
+      this.renderPcButtons(ui);
+    } else if (ui.type === "error") {
+      this.typePcLines([ui.title || "", "", ...(ui.message || [])], 18);
+      this.showPcError((ui.message || []).join("\n"));
+      this.renderPcButtons(ui);
+    } else if (ui.type === "desktop") {
+      this.renderPcDesktop(ui);
+      this.renderPcButtons(null);
+    } else {
+      this.typePcLines(ui.lines || ["(unknown ui.type)"], 18);
+      this.renderPcButtons(ui);
+    }
+    return;
+  } else {
+    if (this.pcMode) this.exitPcMode(true);
+    this.showStoryUI();
+  }
 
-  return; // ✅ stop renderNode here so story UI doesn’t re-render
-} else {
-  if (this.pcMode) this.exitPcMode(true);
-  this.showStoryUI();
-}
+  // ----------------------------
+  // BACKGROUNDS + AUDIO TENSION
+  // ----------------------------
+  const t = typeof node.tension === "number" ? node.tension : null;
+  let intensity = 0.15;
+  if (t != null) intensity = Phaser.Math.Clamp(t, 0, 1);
+  else {
+    const id = (state.nodeId || "").toLowerCase();
+    if (id.includes("echo") || id.includes("bites") || id.includes("escape")) intensity = 0.85;
+    if (id.includes("boss") || id.includes("office")) intensity = 0.55;
+    if (id.includes("mirror")) intensity = 0.65;
+  }
 
-  // --- Music tension control ---
-const t = typeof node.tension === "number" ? node.tension : null;
+  this.tweens.killTweensOf(this.ambient);
 
-// If you don’t set node.tension yet, this fallback keeps things sensible:
-let intensity = 0.15; // calm default
-if (t != null) {
-  intensity = Phaser.Math.Clamp(t, 0, 1);
-} else {
-  // heuristic fallback: you can refine later
-  const id = (state.nodeId || "").toLowerCase();
-  if (id.includes("echo") || id.includes("bites") || id.includes("escape")) intensity = 0.85;
-  if (id.includes("boss") || id.includes("office")) intensity = 0.55;
-  if (id.includes("mirror")) intensity = 0.65;
-}
-// Avoid piling up volume tweens if you click quickly
-this.tweens.killTweensOf(this.ambient);
+  const san = Number.isFinite(state.sanity) ? state.sanity : 10;
+  const maxSan = Number.isFinite(state.maxSanity) ? state.maxSanity : 10;
+  const sanRatio = maxSan > 0 ? san / maxSan : 1;
+  intensity = Math.min(1, Math.max(0, intensity + (1 - sanRatio) * 0.25));
+  setAmbientIntensity(this, intensity);
 
-// --- SANITY INFLUENCE (global) ---
-// sanity low = stronger ambience + more pressure
-const san = Number.isFinite(state.sanity) ? state.sanity : 10;
-const maxSan = Number.isFinite(state.maxSanity) ? state.maxSanity : 10;
-const sanRatio = maxSan > 0 ? san / maxSan : 1;
-
-// push intensity up as sanity drops (0.0 -> +0.25)
-intensity = Math.min(1, Math.max(0, intensity + (1 - sanRatio) * 0.25));
-
-setAmbientIntensity(this, intensity);
-
-  // Background hook (support object OR function)
   if (node.backgroundLayers) {
-    const layers =
-      typeof node.backgroundLayers === "function"
-        ? node.backgroundLayers(state)
-        : node.backgroundLayers;
+    const layers = (typeof node.backgroundLayers === "function")
+      ? node.backgroundLayers(state)
+      : node.backgroundLayers;
 
+    // ✅ IMPORTANT: backgrounds are managed inside setBackgroundLayers()
     this.setBackgroundLayers(layers, state);
     this.tryGhostAppearance(state);
-
   }
 
   // one-frame flicker ONLY when entering mirror
@@ -2744,81 +2912,71 @@ setAmbientIntensity(this, intensity);
     this.oneFrameFlicker();
   }
 
-  // 👁️ Jump scare when mirror variant appears
-if (
-  state.nodeId === "apartment_mirror" &&
-  state.flags.mirrorVariant === "wrong" &&
-  !this.jumpScarePlayed
-) {
-  if (this.cache.audio.exists("jump_scare")) {
-    this.sound.play("jump_scare", { volume: 0.9 });
+  // mirror audio
+  if (state.nodeId === "apartment_mirror" && state.flags.mirrorVariant === "wrong" && !this.jumpScarePlayed) {
+    if (this.cache.audio.exists("jump_scare")) this.sound.play("jump_scare", { volume: 0.9 });
+    this.jumpScarePlayed = true;
   }
-  this.jumpScarePlayed = true;
+
+  if (state.nodeId === "apartment_mirror" && state.flags.mirrorVariant === "demon" && !this.demonLaughPlayed) {
+    if (this.cache.audio.exists("demon_laugh")) this.sound.play("demon_laugh", { volume: 0.75 });
+    this.demonLaughPlayed = true;
+  }
+
+  // ----------------------------
+  // TEXT + CHOICES
+  // ----------------------------
+  this.clearChoices();
+
+  // if we’re using the typed transition system, render invisible then type later
+  if (skipFadeIn) {
+    this.getStoryUiTargets().forEach(t => t && t.setAlpha(0));
+    this.getBgTargets().forEach(t => t && t.setAlpha(0));
+  } else {
+    this.getStoryUiTargets().forEach(t => t && t.setAlpha(1));
+    this.getBgTargets().forEach(t => t && t.setAlpha(1));
+  }
+
+  // Always set title/meta, then either set body instantly or type it
+  this.titleText.setText(node.title || "");
+  const meta = typeof node.meta === "function" ? node.meta(state) : node.meta;
+  this.metaText.setText(meta || "");
+
+  const rawLines = (typeof node.text === "function") ? node.text(state) : node.text;
+  const body = Array.isArray(rawLines) ? rawLines.join("\n") : (rawLines || "");
+  this.bodyText.setText(body);
+
+  // build choices
+  let startY = Math.min(this.scale.height - 220, 520);
+  if (state.nodeId === "intro_game") startY += 60;
+
+  const choices = (typeof node.choices === "function") ? node.choices(state) : node.choices;
+
+  choices?.forEach((c, i) => {
+    const txt = this.add.text(60, startY + i * 34, `> ${c.label}`, {
+      fontFamily: "monospace",
+      fontSize: "20px",
+      color: "#ffffff",
+      shadow: { offsetX: 2, offsetY: 2, color: "#000000", blur: 2, fill: true }
+    })
+    .setDepth(10)
+    .setInteractive({ useHandCursor: true });
+
+    txt.on("pointerdown", () => this.choose(c));
+    this.choiceTexts.push(txt);
+  });
+
+  this.bindChoiceHotkeys();
+
+  // ✅ if we want typing, run it AFTER render
+  if (!skipTyping) {
+    // clear then type with your word-by-word system
+    this.typeCurrentNodeText();
+  }
 }
-
-// 😈 Demon laugh — play ONCE when demon mirror appears
-if (
-  state.nodeId === "apartment_mirror" &&
-  state.flags.mirrorVariant === "demon" &&
-  !this.demonLaughPlayed
-) {
-  if (this.cache.audio.exists("demon_laugh")) {
-    this.sound.play("demon_laugh", { volume: 0.75 });
-  }
-  this.demonLaughPlayed = true;
-}
-
-    // Text content
-    this.titleText.setText(node.title || "");
-    const meta = typeof node.meta === "function" ? node.meta(state) : node.meta;
-    this.metaText.setText(meta || "");
-
-    const lines = typeof node.text === "function" ? node.text(state) : node.text;
-    this.bodyText.setText(Array.isArray(lines) ? lines.join("\n") : (lines || ""));
-
-        this.clearChoices();
-
-    // loot roll (optional)
-    if (node.loot && Math.random() < node.loot.chance) {
-      const drop = node.loot.table[Math.floor(Math.random() * node.loot.table.length)];
-      addItem(state, drop, 1);
-    }
-
-    // Responsive choice placement
-    let startY = Math.min(this.scale.height - 220, 520);
-
-    // intro-only: push "Begin" down away from the dialog
-    if (state.nodeId === "intro_game") {
-      startY += 60; // try 40–90
-    }
-
-    const choices = typeof node.choices === "function" ? node.choices(state) : node.choices;
-
-    choices?.forEach((c, i) => {
-      const txt = this.add.text(60, startY + i * 34, `> ${c.label}`, {
-        fontFamily: "monospace",
-        fontSize: "20px",
-        color: "#ffffff",
-        shadow: {
-          offsetX: 2,
-          offsetY: 2,
-          color: "#000000",
-          blur: 2,
-          fill: true
-        }
-      })
-      .setDepth(10)
-      .setInteractive({ useHandCursor: true });
-
-      txt.on("pointerdown", () => this.choose(c));
-      this.choiceTexts.push(txt);
-    });
-
-    // ✅ AFTER choices exist, bind 1–9 keys once
-    this.bindChoiceHotkeys();
-  }
 
   choose(choice) {
+    this.playUiClick(0.35);
   const state = this.registry.get("state");
 
   // If player clicks forward during intro, cut thunder immediately
@@ -2836,9 +2994,8 @@ if (
     const pass = total >= choice.check.dc;
     state.flags.lastCheck = { ...choice.check, roll, total, pass };
 
-    state.nodeId = pass ? choice.onPass : choice.onFail;
-    this.renderNode();
-    return;
+    return this.transitionToNode(pass ? choice.onPass : choice.onFail);
+
   }
 
   if (choice.action) {
@@ -2859,9 +3016,9 @@ if (
   }
 
   if (choice.go) {
-    state.nodeId = choice.go;
-    this.renderNode();
-  }
+  return this.transitionToNode(choice.go);
+}
+
 }
 
   applyAction(choice) {
