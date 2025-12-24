@@ -1,4 +1,4 @@
-import { makeNewState, loadFromSlot } from "../state.js";
+import { makeNewState, loadFromSlot, getSlotInfo } from "/src/state.js";
 
 export default class MenuScene extends Phaser.Scene {
   constructor() {
@@ -8,7 +8,11 @@ export default class MenuScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
 
-    this.add.rectangle(0, 0, width, height, 0x000000, 1).setOrigin(0);
+    const bgKey = this.textures.exists("menu_bg") ? "menu_bg" : "apartment_bg"; // fallback
+      this.add.image(0, 0, bgKey)
+        .setOrigin(0, 0)
+        .setDisplaySize(width, height)
+        .setDepth(0);
 
     this.add
       .text(width / 2, 140, "DES MOINES AFTER DARK", {
@@ -62,9 +66,37 @@ export default class MenuScene extends Phaser.Scene {
     );
     y += 56;
 
-    makeBtn(y, "LOAD SLOT 1", () => this.loadSlot(0)); y += 44;
-    makeBtn(y, "LOAD SLOT 2", () => this.loadSlot(1)); y += 44;
-    makeBtn(y, "LOAD SLOT 3", () => this.loadSlot(2)); y += 64;
+    const slotLine = (i) => {
+  const info = getSlotInfo(i);
+  if (!info) return `Slot ${i + 1}: (empty)`;
+
+  const s = info.summary;
+  return `Day ${s.day} • ${s.time} • ${s.locationTitle} / ${s.areaTitle}`;
+};
+
+makeBtn(y, "LOAD", () => this.loadSlot(0));
+this.add.text(width / 2, y + 26, slotLine(0), {
+  fontFamily: "monospace",
+  fontSize: "14px",
+  color: "#cfcfcf",
+}).setOrigin(0.5);
+y += 58;
+
+makeBtn(y, "LOAD", () => this.loadSlot(1));
+this.add.text(width / 2, y + 26, slotLine(1), {
+  fontFamily: "monospace",
+  fontSize: "14px",
+  color: "#cfcfcf",
+}).setOrigin(0.5);
+y += 58;
+
+makeBtn(y, "LOAD", () => this.loadSlot(2));
+this.add.text(width / 2, y + 26, slotLine(2), {
+  fontFamily: "monospace",
+  fontSize: "14px",
+  color: "#cfcfcf",
+}).setOrigin(0.5);
+y += 64;
 
     makeBtn(y, "QUIT", () => {
       this.add

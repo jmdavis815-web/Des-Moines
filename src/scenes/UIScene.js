@@ -1,25 +1,26 @@
 export default class UIScene extends Phaser.Scene {
   constructor() {
-    super("UIScene");
+  super("UIScene");
 
-    this.timer = null;
-    this.keys = null;
+  this.timer = null;
+  this.keys = null;
 
-    this.txtHP = null;
-    this.txtSan = null;
-    this.txtCash = null;
-    this.txtXP = null;
+  this.txtHP = null;
+  this.txtSan = null;
+  this.txtCash = null;
+  this.txtXP = null;
+  this.txtTime = null; // ✅ FIXED
 
-    this.btnInv = null;
-    this.btnMap = null;
-    this.btnPause = null;
+  this.btnInv = null;
+  this.btnMap = null;
+  this.btnPause = null;
 
-    this._onResize = null;
+  this._onResize = null;
 
-    // cached state helpers for quick save/load
-    this._stateApi = null;   // { saveToSlot, loadFromSlot }
-    this._stateApiLoading = false;
-  }
+  // cached state helpers for quick save/load
+  this._stateApi = null;
+  this._stateApiLoading = false;
+}
 
   async _getStateApi() {
     if (this._stateApi) return this._stateApi;
@@ -28,8 +29,7 @@ export default class UIScene extends Phaser.Scene {
     this._stateApiLoading = true;
     try {
       // IMPORTANT: path must match where UIScene.js lives relative to state.js
-      // If UIScene.js is in /scenes, change to "../state.js"
-      const mod = await import("../state.js");
+      const mod = await import("./state.js");
       this._stateApi = { saveToSlot: mod.saveToSlot, loadFromSlot: mod.loadFromSlot };
       return this._stateApi;
     } catch (e) {
@@ -41,6 +41,11 @@ export default class UIScene extends Phaser.Scene {
   }
 
   create() {
+    // --- heartbeat loop (created once) ---
+this.heartbeat = this.sound.add("heartbeat", { loop: true, volume: 0 });
+this._hbOn = false;
+
+
     const w = this.scale.width;
 
     // HUD bar
@@ -60,6 +65,7 @@ export default class UIScene extends Phaser.Scene {
     this.txtSan = this.add.text(150, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
     this.txtCash = this.add.text(300, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
     this.txtXP = this.add.text(450, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
+    this.txtTime = this.add.text(w - 520, 10, "", baseStyle).setScrollFactor(0).setDepth(2);
 
     // ---- BUTTON FACTORY ----
     const makeBtn = (x, label, onClick) => {
@@ -99,6 +105,9 @@ export default class UIScene extends Phaser.Scene {
       THREE: Phaser.Input.Keyboard.KeyCodes.THREE,
       TAB: Phaser.Input.Keyboard.KeyCodes.TAB,
     });
+
+    // ✅ stop the browser from using TAB to change focus
+this.input.keyboard.addCapture(Phaser.Input.Keyboard.KeyCodes.TAB);
 
     // Core modal hotkeys
     this.keys.I.on("down", () => this.toggleModal("InventoryScene"));
@@ -160,18 +169,21 @@ export default class UIScene extends Phaser.Scene {
 
     // ---- HUD TOGGLE (cinematic) ----
     this.keys.TAB.on("down", () => {
-      const visible = this.hudBg.visible;
-      const next = !visible;
+    const visible = this.hudBg.visible;
+    const next = !visible;
 
-      this.hudBg.setVisible(next);
-      this.txtHP.setVisible(next);
-      this.txtSan.setVisible(next);
-      this.txtCash.setVisible(next);
-      this.txtXP.setVisible(next);
-      this.btnInv.setVisible(next);
-      this.btnMap.setVisible(next);
-      this.btnPause.setVisible(next);
-    });
+    this.hudBg.setVisible(next);
+    this.txtHP.setVisible(next);
+    this.txtSan.setVisible(next);
+    this.txtCash.setVisible(next);
+    this.txtXP.setVisible(next);
+    this.txtTime.setVisible(next); // ✅ added
+
+    this.btnInv.setVisible(next);
+    this.btnMap.setVisible(next);
+    this.btnPause.setVisible(next);
+  });
+
 
     // ---- ESC PRIORITY CLOSE ----
     // IMPORTANT: Only resume StoryScene when *no* modals remain open.
@@ -204,15 +216,17 @@ export default class UIScene extends Phaser.Scene {
 
     // ---- RESIZE ----
     this._onResize = (gameSize) => {
-      const ww = gameSize.width;
+    const ww = gameSize.width;
 
-      this.hudBg.width = ww;
-      this.hudBg.x = ww / 2;
+    this.hudBg.width = ww;
+    this.hudBg.x = ww / 2;
 
-      this.btnInv.x = ww - 300;
-      this.btnMap.x = ww - 170;
-      this.btnPause.x = ww - 60;
-    };
+    this.txtTime.x = ww - 520; // ✅ TIME RESIZE
+
+    this.btnInv.x = ww - 300;
+    this.btnMap.x = ww - 170;
+    this.btnPause.x = ww - 60;
+  };
 
     this.scale.on("resize", this._onResize);
 
@@ -239,6 +253,9 @@ export default class UIScene extends Phaser.Scene {
         try { k.removeAllListeners(); } catch {}
       });
     });
+
+    // ✅ ALWAYS keep HUD on top at start
+this.scene.bringToTop("UIScene");
 
     this.refresh();
   }
@@ -272,12 +289,20 @@ export default class UIScene extends Phaser.Scene {
     ]);
 
     // close if already open
+// close if already open
 if (this.scene.isActive(key)) {
-  // ✅ If we're closing the map, use MapScene's own close routine
+  const modal = this.scene.get(key);
+
+  // ✅ Prefer scene-owned close routine if it exists
+  if (modal?.closeModal) {
+    modal.closeModal();
+    return;
+  }
+
+  // ✅ Back-compat for MapScene
   if (key === "MapScene") {
-    const map = this.scene.get("MapScene");
-    if (map?.closeMap) {
-      map.closeMap();
+    if (modal?.closeMap) {
+      modal.closeMap();
       return;
     }
   }
@@ -315,9 +340,44 @@ this.scene.bringToTop(key);
     const state = this.registry.get("state");
     if (!state) return;
 
+    const mins = Number(state.time?.minutes ?? 0);
+    const h = Math.floor(mins / 60) % 24;
+    const m = String(mins % 60).padStart(2, "0");
+    this.txtTime.setText(`TIME: ${h}:${m}`);
+
     this.txtHP.setText(`HP: ${state.hp ?? 0}/${state.maxHp ?? 0}`);
     this.txtSan.setText(`SAN: ${state.sanity ?? 0}/${state.maxSanity ?? 0}`);
     this.txtCash.setText(`$${state.cash ?? 0}`);
     this.txtXP.setText(`XP: ${state.xp ?? 0}/${state.xpToNext ?? 0}`);
+
+    // --- heartbeat intensity based on low HP ---
+const s = this.registry.get("state") || {};
+const hp = Number.isFinite(s.hp) ? s.hp : 0;
+const maxHp = Number.isFinite(s.maxHp) && s.maxHp > 0 ? s.maxHp : 1;
+
+const ratio = hp / maxHp;
+
+// start heartbeat when <= 30% hp (tweak this)
+const low = ratio <= 0.30;
+
+if (low) {
+  // intensity goes 0..1 as ratio goes 0.30 -> 0.00
+  const intensity = Phaser.Math.Clamp((0.30 - ratio) / 0.30, 0, 1);
+
+  // louder + faster as it gets worse
+  const vol = Phaser.Math.Linear(0.15, 0.85, intensity);
+  const rate = Phaser.Math.Linear(1.0, 1.8, intensity);
+
+  if (!this.heartbeat.isPlaying) this.heartbeat.play();
+
+  this.heartbeat.setVolume(vol);
+  this.heartbeat.setRate(rate);
+} else {
+  if (this.heartbeat.isPlaying) this.heartbeat.stop();
+  this.heartbeat.setVolume(0);
+  this.heartbeat.setRate(1);
+}
+
+
   }
 }

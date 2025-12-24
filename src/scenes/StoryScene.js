@@ -1,8 +1,9 @@
+// This file lives alongside main.js (not in a /scenes folder), so keep imports relative to the project root.
 import { NODES } from "../db_scenes.js";
 import { ITEM_DB } from "../db_items.js";
 import { addItem, removeItem, clamp, getTotalStats } from "../utils.js";
 import { startAmbientMusic, setAmbientIntensity } from "../audio/ambient.js";
-import { playDeathFX } from "../scenes/death_fx.js";
+import { playDeathFX } from "./death_fx.js";
 import PCWindowManager from "../ui/PCWindowManager.js";
 
 export default class StoryScene extends Phaser.Scene {
@@ -10,6 +11,7 @@ export default class StoryScene extends Phaser.Scene {
   super("StoryScene");
   this.thunder = null;
   this.jumpScarePlayed = false; // 👈 add
+  this._pcClickKey = "pc_click";
   this.demonLaughPlayed = false;
   this.ghostActive = false;
   this.lastGhostTime = 0;
@@ -33,6 +35,22 @@ this.uiSfx = {
   whoosh: null,
 };
 
+    // --- DEV / DEBUG ---
+    // F3: toggle on-screen debug overlay
+    // F2: run node validator (console output)
+    this.debug = {
+      enabled: false,
+      text: null,
+      bg: null,
+      keysBound: false,
+      lastRefresh: 0,
+    };
+
+    // One-shot PC terror moments (reset when entering PC)
+    this._pcMoment = {
+      fakeRebootDone: false,
+    };
+
 }
 
 clearBleedSprites() {
@@ -41,15 +59,80 @@ clearBleedSprites() {
   this.bleedSprites.length = 0;
 }
 
+playInjuryFX(amount = 1) {
+  // stop previous injury FX so it doesn’t stack
+  if (this.injuryFx) {
+    try { this.injuryFx.destroy?.(); } catch {}
+    this.injuryFx = null;
+  }
+
+  // play grunt
+  if (this.cache?.audio?.exists("grunt")) {
+    try { this.sound.play("grunt", { volume: 0.65 }); } catch {}
+  }
+
+  // scale intensity by damage
+  const dmg = Math.max(1, Number(amount) || 1);
+  const dmgScale = Math.min(1, dmg / 6); // 1..6 maps to 0.16..1
+
+  // reuse the SAME death FX system, just toned down + auto cleanup
+  this.injuryFx = playDeathFX(this, {
+    shakeDuration: 120 + Math.floor(120 * dmgScale),
+    shakeIntensity: 0.004 + 0.006 * dmgScale,
+    vignetteAlpha: 0.18 + 0.18 * dmgScale,
+    baseAlpha: 0.20 + 0.22 * dmgScale,
+    fadeInMs: 90,
+    dripDelayMs: 420,
+    minLayers: 1,
+    maxLayers: 2 + (dmgScale > 0.6 ? 1 : 0),
+    useMultiply: false,
+    crackChance: 0.35 + 0.45 * dmgScale,
+    crackAlpha: 0.12 + 0.18 * dmgScale,
+    crackThickness: dmgScale > 0.75 ? 2 : 1,
+    crackCount: 3 + Math.floor(3 * dmgScale),
+    autoCleanupMs: 900, // key difference: injury cleans itself up
+  });
+}
+
 
   create() {
     console.log("StoryScene LOADED ✅ (ghost build A)");
+
+    const s = this.registry.get("state");
+s.flags = s.flags || {};
+
+// start day timer once per loop/day
+if (!s.flags.day_started_at) {
+  s.flags.day_started_at = Date.now();
+  s.flags.day_warned = false;
+  s.flags.day_forced_death = false;
+}
+
+    // --- state namespaces (non-breaking) ---
+    const _s0 = this.registry.get("state");
+    if (_s0) {
+      _s0.flags = _s0.flags || {};
+      _s0.flags.pc = _s0.flags.pc || {};
+      _s0.flags.mirror = _s0.flags.mirror || {};
+      _s0.flags.day = _s0.flags.day || {};
+      _s0.flags.loop = _s0.flags.loop || {};
+    }
+
+    // --- dev hotkeys (once) ---
+    if (this.input?.keyboard && !this.debug?.keysBound) {
+      this.debug.keysBound = true;
+      const kF3 = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+      const kF2 = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F2);
+
+      kF3.on("down", () => this.toggleDebugOverlay());
+      kF2.on("down", () => this.runNodeValidator());
+    }
     
     const click = () => {
-  if (this.cache.audio.exists("ui_click")) {
-    this.sound.play("ui_click", { volume: 0.35 });
-  }
-};
+      if (this.cache.audio.exists("ui_click")) {
+        this.sound.play("ui_click", { volume: 0.35 });
+      }
+    };
     
     const { width } = this.scale;
     this.ambient = startAmbientMusic(this);
@@ -81,6 +164,7 @@ this.input.keyboard.once("keydown", unlockAudio);
     try { this._screenMask.destroy(); } catch {}
     this._screenMask = null;
   }
+
   if (this._onPcResize) {
   try { this.scale.off("resize", this._onPcResize); } catch {}
   this._onPcResize = null;
@@ -165,6 +249,15 @@ this.scale.on("resize", this._onStoryResize);
     this.renderNode();
   }
 
+  finalDeath(state, { cause = "unknown", detail = "", damage = 0 } = {}) {
+  state.flags = state.flags || {};
+  state.flags.final_death_source_node = state.nodeId;
+  state.flags.final_death_cause = cause;     // broad bucket
+  state.flags.final_death_detail = detail;   // optional spice
+  state.flags.final_death_damage = damage;
+
+  this.transitionToNode("final_death");
+}
 
   // ---------- UTILS ----------
   makeScreenMask(maskDef, anchorX, anchorY) {
@@ -215,6 +308,35 @@ bindPcResizeHandler() {
   };
 
   this.scale.on("resize", this._onPcResize);
+}
+
+demonBleedThenGo(go, demonKey, opts = {}) {
+  const holdMs = opts.holdMs ?? 180;
+
+  const normalKey = this.bgSprites?.bg?.texture?.key;
+  const canBleed =
+    !!normalKey &&
+    this.textures.exists(normalKey) &&
+    this.textures.exists(demonKey) &&
+    typeof this.bleedToBg === "function";
+
+  // fallback if keys aren't loaded / bg not ready
+  if (!canBleed) return this.transitionToNode(go);
+
+  // bleedToBg uses D=1200 internally【turn6file1†StoryScene.js†L50-L52】
+  const D = 1200;
+
+  // demon flash
+  this.bleedToBg(demonKey);
+
+  // back to normal, then actually go
+  this.time.delayedCall(D + holdMs, () => {
+    this.bleedToBg(normalKey);
+
+    this.time.delayedCall(D + 40, () => {
+      this.transitionToNode(go);
+    });
+  });
 }
 
   bleedToBg(newKey, cx, cy) {
@@ -302,6 +424,7 @@ bindPcResizeHandler() {
     oldBg.setAlpha(1);
     this.clearBleedSprites();
   });
+  return t2; // ✅ add this
 }
 
   killBackgroundTweens() {
@@ -336,6 +459,7 @@ ensureUiSfx() {
   if (!this.uiSfx.whoosh && this.sound.get("ui_whoosh")) this.uiSfx.whoosh = this.sound.get("ui_whoosh");
 }
 
+
 playUiClick(vol = 0.35) {
   this.ensureUiSfx();
   // allow if loaded; if not loaded, just do nothing (no crash)
@@ -343,8 +467,24 @@ playUiClick(vol = 0.35) {
 }
 
 playUiTypeTick(vol = 0.12) {
-  this.ensureUiSfx();
-  if (this.sound && this.sound.get("ui_type")) this.sound.play("ui_type", { volume: vol });
+  try {
+    if (!this.sound) return;
+    if (!this.cache?.audio?.exists("ui_type")) return;
+
+    if (!this._uiTypeSfx) {
+      this._uiTypeSfx = this.sound.add("ui_type", { volume: vol });
+    } else {
+      this._uiTypeSfx.setVolume(vol);
+    }
+
+    // Restart sound if already playing (soft retrigger)
+    if (this._uiTypeSfx.isPlaying) {
+      this._uiTypeSfx.stop();
+    }
+    this._uiTypeSfx.play();
+  } catch {
+    // silent by design
+  }
 }
 
 playUiWhoosh(vol = 0.25) {
@@ -503,9 +643,10 @@ typeCurrentNodeText() {
   const node = NODES[state.nodeId];
   if (!node) return;
 
-  // Build the strings exactly like you already do when rendering
   const title = node.title || "";
-  const meta  = node.meta || "";
+
+  // ✅ match renderNode meta behavior
+  const meta = (typeof node.meta === "function") ? node.meta(state) : (node.meta || "");
 
   // node.text can be function returning array of lines
   let lines = [];
@@ -516,7 +657,8 @@ typeCurrentNodeText() {
     lines = ["(something went wrong)"];
   }
 
-  const body = lines.join("\n");
+  // ✅ prefer cached body from renderNode (includes loot msg, etc.)
+  const body = (this._lastBodyText != null) ? this._lastBodyText : lines.join("\n");
 
   // Clear first
   this.titleText.setText("");
@@ -532,6 +674,57 @@ typeCurrentNodeText() {
   this.time.delayedCall(260, () => {
     this.typeTextWordByWord(this.bodyText, body, { baseDelay: 28, wordDelay: 45, punctDelay: 140, tickEvery: 2 });
   });
+}
+
+// =====================================================
+// PC / COMPUTER SOUND EFFECT HELPERS
+// Safe: never crash if sound missing or scene not ready
+// =====================================================
+
+_playPcSfx(key, volume = 0.35) {
+  try {
+    if (!this.sound) return;
+    if (this.cache?.audio && !this.cache.audio.exists(key)) return;
+
+    this._pcSfx = this._pcSfx || {};
+
+    if (!this._pcSfx[key]) {
+      this._pcSfx[key] = this.sound.add(key, { volume });
+    } else {
+      this._pcSfx[key].setVolume(volume);
+    }
+
+    if (!this._pcSfx[key].isPlaying) {
+      this._pcSfx[key].play();
+    }
+  } catch {
+    // silent by design
+  }
+}
+
+// --- clicks ---
+playPcClick(vol = 0.30) {
+  this._playPcSfx("pc_click", vol);
+}
+
+// --- confirmations / success ---
+playPcConfirm(vol = 0.28) {
+  this._playPcSfx("pc_confirm", vol);
+}
+
+// --- errors / access denied / crash ---
+playPcError(vol = 0.45) {
+  this._playPcSfx("pc_error", vol);
+}
+
+// --- typing / ticking ---
+playPcTick(vol = 0.18) {
+  this._playPcSfx("pc_tick", vol);
+}
+
+// --- glitch / distortion ---
+playPcGlitch(vol = 0.4) {
+  this._playPcSfx("pc_glitch", vol);
 }
 
   // ---------- BACKGROUND RENDERING ----------
@@ -628,7 +821,7 @@ if (layerKeys.screen && this.textures.exists(layerKeys.screen)) {
   const screen = this.add.image(0, 0, layerKeys.screen)
     .setDepth(-18)
     .setOrigin(0.5)
-    .setAlpha(layerKeys.screenAlpha ?? 0.95);
+    .setAlpha(layerKeys.screenAlpha ?? 1);
 
   const sx = (layerKeys.screenX ?? 0.23) * this.scale.width;
   const sy = (layerKeys.screenY ?? 0.62) * this.scale.height;
@@ -680,8 +873,8 @@ if (!isResizeRefresh) {
   const tvFlicker = this.tweens.add({
     targets: screen,
     alpha: {
-      from: (layerKeys.screenAlpha ?? 0.95) - 0.05,
-      to:   (layerKeys.screenAlpha ?? 0.95) + 0.05
+      from: (layerKeys.screenAlpha ?? 1) - 0.05,
+      to:   (layerKeys.screenAlpha ?? 1) + 0.05
     },
     duration: Phaser.Math.Between(80, 140),
     yoyo: true,
@@ -689,15 +882,15 @@ if (!isResizeRefresh) {
   });
   this.bgTweens.push(tvFlicker);
 
-  // Gentle wobble
+   //Gentle wobble
   const tvWobble = this.tweens.add({
     targets: screen,
-    angle: screen.angle + 0.3,
+    angle: screen.angle + 0.1,
     duration: 6000,
     yoyo: true,
     repeat: -1,
     ease: "Sine.inOut",
-  });
+ });
   this.bgTweens.push(tvWobble);
 }
 }
@@ -864,6 +1057,12 @@ enterPcMode(ui) {
   this.pcTyping = null;
   this.pcLines = [];
   this.pcIndex = 0;
+  this.playPcClick(0.4);
+this.playPcWhoosh?.(0.12); // optional reuse
+
+  // reset one-shot PC terror moments for this PC session
+  if (!this._pcMoment) this._pcMoment = {};
+  this._pcMoment.fakeRebootDone = false;
 
   // build UI first so cursor exists
   if (!this.pcUI) this.buildPcUI();
@@ -1210,30 +1409,99 @@ tickPcTerrorPack() {
 
     const roll = Math.random();
 
-    // 0) Sometimes: “sticky” popups (won’t stop)
+    // 0) Rare: fake reboot (intensity 3, once per PC session)
+    if (intensity === 3 && !this._pcMoment?.fakeRebootDone && roll < 0.08) {
+      this._pcMoment = this._pcMoment || {};
+      this._pcMoment.fakeRebootDone = true;
+      this.pcTerrorBurstFakeReboot();
+      return;
+    }
+
+    // 1) Sometimes: “sticky” popups (won’t stop)
     if (intensity >= 2 && roll < 0.12) {
       this.pcTerrorBurstStickyPopups(intensity);
       return;
     }
 
-    // 1) Error popups
+    // 2) Error popups
     if (roll < 0.46) {
       this.pcTerrorBurstError(intensity);
       return;
     }
 
-    // 2) Terminal windows
+    // 3) Terminal windows
     if (roll < 0.76) {
       this.pcTerrorBurstTerminal(intensity);
       return;
     }
 
-    // 3) Fake hacking progress
+    // 4) Fake hacking progress
     this.pcTerrorBurstProgress(intensity);
   }
 }
 
 // ---------- BURSTS ----------
+
+pcTerrorBurstFakeReboot() {
+  // A short “soft reboot” sequence that clears windows and lies about recovery.
+  const cam = this.cameras.main;
+
+  // clear windows to make it feel like the OS restarted
+  try { this.pcUI?.winMan?.destroyAll?.(); } catch {}
+
+  this.startPcGlitch(650, 1.8);
+  this.playPcError?.(0.22);
+
+  const overlay = this.add
+    .rectangle(0, 0, cam.width, cam.height, 0x000000, 1)
+    .setOrigin(0, 0)
+    .setScrollFactor(0)
+    .setDepth(20050)
+    .setAlpha(0);
+
+  const msg = this.add
+    .text(cam.centerX, cam.centerY, "Restarting…", {
+      fontFamily: "monospace",
+      fontSize: "24px",
+      color: "#eaeaea",
+      align: "center",
+    })
+    .setOrigin(0.5)
+    .setScrollFactor(0)
+    .setDepth(20051)
+    .setAlpha(0);
+
+  this.tweens.add({ targets: [overlay, msg], alpha: 1, duration: 110, ease: "Sine.easeOut" });
+
+  this.time.delayedCall(650, () => {
+    msg.setText("Checking disk…\n0 errors found.");
+  });
+
+  this.time.delayedCall(1300, () => {
+    msg.setText("Restoring session…");
+  });
+
+  this.time.delayedCall(1900, () => {
+    msg.setText("Session restored.");
+    // A small lie as an aftertaste
+    if (Math.random() < 0.55) {
+      this.openPcToast?.("ARCH1VE recovered (1 error)", { title: "SYSTEM", variant: "warn", autoCloseMs: 1800 });
+    }
+  });
+
+  this.time.delayedCall(2300, () => {
+    this.tweens.add({
+      targets: [overlay, msg],
+      alpha: 0,
+      duration: 180,
+      ease: "Sine.easeIn",
+      onComplete: () => {
+        try { overlay.destroy(); } catch {}
+        try { msg.destroy(); } catch {}
+      },
+    });
+  });
+}
 
 pcTerrorBurstError(intensity) {
   const now = this.time.now;
@@ -1727,6 +1995,7 @@ exitPcMode(skipRender = false) {
   this.pcMode = false;
   this._lastPcUi = null;
   this.stopPcTerrorPack();
+  this.playPcClick(0.25);
 
   // restore OS cursor
   this.input.setDefaultCursor("auto");
@@ -1801,6 +2070,7 @@ renderPcDesktop(ui) {
     });
 
     sprite.on("pointerdown", () => {
+      this.playPcClick(0.33);
   // if a modal/window is open, you can choose to keep it (real OS),
   // or close it for focus feel. We'll keep OS-real: DO NOT force-close.
 
@@ -1816,6 +2086,7 @@ renderPcDesktop(ui) {
   const target = NODES[ic.go];
   if (!target) {
     this.openPcModal([`Missing PC node: ${ic.go}`], { title: "ERROR" });
+    this.playPcError(0.55);
     return;
   }
 
@@ -1982,6 +2253,7 @@ if (goId === "office_pc_recycle_readme" && !s.flags._pc_moment_recycle_once) {
 
   // ---------- FOLDERS ----------
   if (ic.icon === "folder") {
+    this.playPcConfirm(0.18);
     // Folder opens: either switch desktops, or open folder contents in a window
     if (nextUI?.type === "desktop") {
       this.renderPcDesktop(nextUI);
@@ -2002,6 +2274,8 @@ if (goId === "office_pc_recycle_readme" && !s.flags._pc_moment_recycle_once) {
   }
 
   // ---------- FILES ----------
+  this.playPcConfirm(0.16);
+
   // Files open in OS windows, do NOT change desktop
   let lines = null;
   let title = ic.label ?? "FILE";
@@ -2367,6 +2641,10 @@ openPcErrorDialog(messageLines, opts = {}) {
   if (!this.pcUI?.winMan) return;
 
   const variant = opts.variant || "error"; // error | warn | info
+   // ✅ centralized audio: error / warn / info
+  if (variant === "error") this.playPcError(0.55);
+  else if (variant === "warn") this.playPcError(0.35);  // softer “warning”
+  else this.playPcConfirm(0.12);
   const title = opts.title || (variant === "warn" ? "WARNING" : variant === "info" ? "NOTICE" : "ERROR");
 
   const message = Array.isArray(messageLines)
@@ -2508,6 +2786,9 @@ renderPcButtons(ui) {
     .setInteractive();
 
     t.on("pointerdown", () => {
+      this.playPcClick(0.34);  // ✅ PC button click
+      if (b.action === "closePC") this.playPcConfirm(0.18);
+
   const state = this.registry.get("state");
 
   if (b.action) {
@@ -2536,6 +2817,11 @@ renderPcButtons(ui) {
 
 startPcGlitch(ms = 900, strength = 1) {
   if (!this.pcMode || !this.pcUI) return;
+
+  // ✅ glitch audio
+  this.playPcError(0.28);     // short “digital sting”
+  // OR if you add a dedicated pc_glitch sound later:
+  // this.sound.play("pc_glitch", { volume: 0.22 });
 
   const now = this.time.now;
   this._pcCursorHijack = true;
@@ -2694,6 +2980,93 @@ enablePcGlitchOverlay() {
   });
 }
 
+  // ----------------------------
+  // LOOT SYSTEM (node.loot)
+  // ----------------------------
+  // Usage in a node:
+  // loot: { chance: 0.65, table: ["lucky_coin", "note_1"], once: true }
+  //
+  // - chance: 0..1 (default 1)
+  // - table: array of item ids OR weighted entries:
+  //     [{ id: "lucky_coin", w: 3 }, { id:"rare_key", w: 1 }]
+  // - once: if true (default), roll only once per save for that node (prevents farming)
+  // - flag: optional override key used for the "once" memory
+  rollNodeLoot(nodeId, node, state) {
+    const loot = node?.loot;
+    if (!loot) return null;
+
+    const chance = Number(loot.chance ?? 1);
+    const once = (loot.once ?? true) === true;
+    const flagKey = loot.flag || `lootRolled:${nodeId}`;
+
+    state.flags = state.flags || {};
+
+    // "once" means: we only ROLL once (success or fail) for this node.
+    if (once && state.flags[flagKey]) return null;
+
+    // mark the roll as consumed (prevents re-rolling on revisit)
+    if (once) state.flags[flagKey] = true;
+
+    // roll
+    if (chance < 1) {
+      const r = Math.random();
+      if (r > chance) return null;
+    }
+
+    const table = Array.isArray(loot.table) ? loot.table : [];
+    if (!table.length) return null;
+
+    // pick (supports strings or weighted objects)
+    let pickedId = null;
+
+    const weighted = table.some(e => e && typeof e === "object");
+    if (weighted) {
+      let total = 0;
+      const entries = table
+        .map(e => {
+          if (!e) return null;
+          if (typeof e === "string") return { id: e, w: 1 };
+          const id = e.id || e.item || e.key;
+          const w = Number(e.w ?? e.weight ?? 1);
+          if (!id || !Number.isFinite(w) || w <= 0) return null;
+          return { id, w };
+        })
+        .filter(Boolean);
+
+      for (const e of entries) total += e.w;
+      if (total <= 0) return null;
+
+      let roll = Math.random() * total;
+      for (const e of entries) {
+        roll -= e.w;
+        if (roll <= 0) {
+          pickedId = e.id;
+          break;
+        }
+      }
+      if (!pickedId) pickedId = entries[entries.length - 1]?.id ?? null;
+    } else {
+      pickedId = table[Math.floor(Math.random() * table.length)] || null;
+    }
+
+    return pickedId;
+  }
+
+  grantNodeLoot(nodeId, node, state) {
+    const itemId = this.rollNodeLoot(nodeId, node, state);
+    if (!itemId) return null;
+
+    // add to inventory
+    addItem(state, itemId, 1);
+
+    // build a one-time UI message the node can show
+    const itemName = ITEM_DB?.[itemId]?.name || ITEM_DB?.[itemId]?.title || itemId;
+    state.flags = state.flags || {};
+    state.flags._loot_msg = `You found: ${itemName}`;
+
+    return itemId;
+  }
+
   renderNode(opts = {}) {
   const {
     skipFadeIn = false,
@@ -2717,57 +3090,22 @@ enablePcGlitchOverlay() {
 
   const entering = prevNodeId !== nextNodeId;
 
+  // ✅ Mirror demon hold decay should tick ONCE per entry, not during text render
+if (entering && nextNodeId === "apartment_mirror") {
+  state.flags = state.flags || {};
+  if (state.flags.mirrorVariant === "demon") {
+    state.flags.mirror_demon_hold = (state.flags.mirror_demon_hold ?? 2) - 1;
+
+    if (state.flags.mirror_demon_hold <= 0) {
+      state.flags.mirrorVariant = "normal";
+      delete state.flags.mirror_demon_hold;
+    }
+  }
+}
+
   // ✅ mark first-death (loop awareness hook)
   if (entering && nextNodeId === "death_first_time") {
     state.flags.first_death_seen = true;
-  }
-
-  // ----------------------------
-  // END-OF-DAY INEVITABILITY
-  // ----------------------------
-  const DAY_STEP_LIMIT = 18;
-  const WARNING_STEP = 16;
-
-  // reset the "day" counter when the loop resets
-  if (entering && nextNodeId === "intro_game") {
-    state.flags.day_steps = 0;
-    state.flags.day_forced_death = false;
-    state.flags.day_warned = false;
-  }
-
-  if (entering) {
-    const id = (nextNodeId || "").toLowerCase();
-
-    const exempt =
-      id === "intro_game" ||
-      id === "final_death" ||
-      id === "death_end_of_day" ||
-      id === "day_warning" ||
-      id.startsWith("death_") ||
-      id.startsWith("part1_") ||
-      id.includes("demon_realm");
-
-    if (!exempt) {
-      state.flags.day_steps = (state.flags.day_steps ?? 0) + 1;
-    }
-
-    // warning
-    if (!state.flags.day_warned && (state.flags.day_steps ?? 0) >= WARNING_STEP) {
-      state.flags.day_warned = true;
-      state.nodeId = "day_warning";
-      this._lastNodeId = null;
-      this.renderNode(opts);
-      return;
-    }
-
-    // forced death
-    if (!state.flags.day_forced_death && (state.flags.day_steps ?? 0) >= DAY_STEP_LIMIT) {
-      state.flags.day_forced_death = true;
-      state.nodeId = "death_end_of_day";
-      this._lastNodeId = null;
-      this.renderNode(opts);
-      return;
-    }
   }
 
   if (entering && prevNodeId === "apartment_mirror") {
@@ -2775,18 +3113,37 @@ enablePcGlitchOverlay() {
     this.demonLaughPlayed = false;
   }
 
-  if (entering && nextNodeId === "intro_game") this.playIntroThunderOnce();
-  if (entering && prevNodeId === "intro_game" && nextNodeId !== "intro_game") this.stopIntroThunder();
+// ✅ only heal on the true loop restart
+if (entering && nextNodeId === "intro_game") {
+  state.hp = state.maxHp;
+  state.sanity = state.maxSanity;
 
-  // Run hooks once
+  state.flags.day_started_at = Date.now();
+  state.flags.day_warned = false;
+  state.flags.day_forced_death = false;
+
+  // clear lingering death FX just in case
+  try { this.deathFx?.destroy?.(); } catch {}
+  this.deathFx = null;
+  this._deathFxNodeId = null;
+
+  this.playIntroThunderOnce();
+}
+
+    // Run hooks once
   if (entering) {
     if (prevNode?.onExit) prevNode.onExit(state);
-    if (node?.onEnter) node.onEnter(state);
+    if (node?.onEnter) node.onEnter(state, this);
+
+    // LOOT: roll + grant once per node entry (if node.loot exists)
+    this.grantNodeLoot(nextNodeId, node, state);
   }
 
   // update last node AFTER hooks
   this._lastNodeId = nextNodeId;
 
+
+  
   // ----------------------------
   // DEATH FX
   // ----------------------------
@@ -2799,7 +3156,13 @@ enablePcGlitchOverlay() {
     this._deathFxNodeId = null;
   }
 
+  
+
   if (enteringNode && this.isDeathNode(nowNodeId)) {
+    state.hp = 0;
+    // ✅ remember how you died (for intro_game variations)
+state.flags.last_death_id = nowNodeId;
+state.flags.last_death_at = Date.now();
     state.flags = state.flags || {};
     if (!state.flags.first_death_seen) {
       state.flags.first_death_seen = true;
@@ -2809,7 +3172,7 @@ enablePcGlitchOverlay() {
     if (this._deathFxNodeId !== nowNodeId) {
       this._deathFxNodeId = nowNodeId;
 
-      const isCleanFailsafe = !!state.flags?.failsafe_seen || nowNodeId === "final_death";
+      const isCleanFailsafe = !!state.flags?.failsafe_seen;
       const isBigImpact = nowNodeId === "apartment_demon_death" || nowNodeId === "death_end_of_day";
       const crackChance = isCleanFailsafe ? 0.15 : (isBigImpact ? 0.9 : 0.6);
 
@@ -2876,6 +3239,43 @@ enablePcGlitchOverlay() {
     this.showStoryUI();
   }
 
+  const DAY_LENGTH_MS = 60 * 60 * 1000;     // 1 hour
+const WARNING_AT_MS  = 50 * 60 * 1000;    // warning at 50 min (optional)
+
+if (entering) {
+  state.flags = state.flags || {};
+  const started = state.flags.day_started_at ?? Date.now();
+  const elapsed = Date.now() - started;
+
+  const id = (nextNodeId || "").toLowerCase();
+  const exempt =
+    id === "intro_game" ||
+    id === "final_death" ||
+    id === "death_end_of_day" ||
+    id === "day_warning" ||
+    id.startsWith("death_") ||
+    id.startsWith("part1_") ||
+    id.includes("demon_realm");
+
+  if (!exempt) {
+    if (!state.flags.day_warned && elapsed >= WARNING_AT_MS) {
+      state.flags.day_warned = true;
+      state.nodeId = "day_warning";
+      this._lastNodeId = null;
+      this.renderNode(opts);
+      return;
+    }
+
+    if (!state.flags.day_forced_death && elapsed >= DAY_LENGTH_MS) {
+      state.flags.day_forced_death = true;
+      state.nodeId = "death_end_of_day";
+      this._lastNodeId = null;
+      this.renderNode(opts);
+      return;
+    }
+  }
+}
+
   // ----------------------------
   // BACKGROUNDS + AUDIO TENSION
   // ----------------------------
@@ -2937,14 +3337,32 @@ enablePcGlitchOverlay() {
     this.getBgTargets().forEach(t => t && t.setAlpha(1));
   }
 
-  // Always set title/meta, then either set body instantly or type it
-  this.titleText.setText(node.title || "");
-  const meta = typeof node.meta === "function" ? node.meta(state) : node.meta;
-  this.metaText.setText(meta || "");
+  // Always set title/meta
+const title = node.title || "";
+this.titleText.setText(title);
 
-  const rawLines = (typeof node.text === "function") ? node.text(state) : node.text;
-  const body = Array.isArray(rawLines) ? rawLines.join("\n") : (rawLines || "");
+const meta = typeof node.meta === "function" ? node.meta(state) : node.meta;
+this.metaText.setText(meta || "");
+
+// Build body
+const rawLines = (typeof node.text === "function") ? node.text(state) : node.text;
+let body = Array.isArray(rawLines) ? rawLines.join("\n") : (rawLines || "");
+
+// If loot dropped on entry, append a little notification once.
+if (state?.flags?._loot_msg) {
+  body = `${body}\n\n[${state.flags._loot_msg}]`;
+  delete state.flags._loot_msg;
+}
+
+// ✅ Cache the exact body we computed so typing matches perfectly
+this._lastBodyText = body;
+
+// ✅ Prevent the one-frame flash: don't set full body if we're about to type it
+if (opts?.skipTyping) {
+  this.bodyText.setText("");
+} else {
   this.bodyText.setText(body);
+}
 
   // build choices
   let startY = Math.min(this.scale.height - 220, 520);
@@ -2952,8 +3370,32 @@ enablePcGlitchOverlay() {
 
   const choices = (typeof node.choices === "function") ? node.choices(state) : node.choices;
 
-  choices?.forEach((c, i) => {
-    const txt = this.add.text(60, startY + i * 34, `> ${c.label}`, {
+  const isDeath = this.isDeathNode(state.nodeId);
+
+let renderedChoices = choices || [];
+if (isDeath) {
+  renderedChoices = renderedChoices.map(c => {
+    if (!c) return c;
+    if (c.go) return { ...c, go: "intro_game" };
+    return c;
+  });
+}
+
+
+    // --- CHOICES (multi-column) ---
+  const ROWS_PER_COL = 6;     // ✅ max choices per column
+  const startX = 60;          // left edge of first column
+  const colW = 420;           // ✅ space between columns (tweak)
+  const rowH = 34;            // vertical spacing (was your 34)
+
+  renderedChoices?.forEach((c, i) => {
+    const col = Math.floor(i / ROWS_PER_COL);
+    const row = i % ROWS_PER_COL;
+
+    const x = startX + col * colW;
+    const y = startY + row * rowH;
+
+    const txt = this.add.text(x, y, `> ${c.label}`, {
       fontFamily: "monospace",
       fontSize: "20px",
       color: "#ffffff",
@@ -2976,13 +3418,39 @@ enablePcGlitchOverlay() {
 }
 
   choose(choice) {
-    this.playUiClick(0.35);
+  this.playUiClick(0.35);
   const state = this.registry.get("state");
 
   // If player clicks forward during intro, cut thunder immediately
   if (this._lastNodeId === "intro_game") {
     this.stopIntroThunder();
   }
+
+  // ✅ HARD BLOCK: choice gating (if you ever leave "locked" choices visible)
+  if (choice.when && typeof choice.when === "function") {
+    if (!choice.when(state, this)) return;
+  }
+  if (choice.requires && !meetsRequirements(state, choice.requires)) return;
+
+  // ✅ ONCE: prevent repeats (secret pickups etc)
+  if (choice.onceKey) {
+    if (state.flags?.[choice.onceKey]) return;
+    state.flags ??= {};
+    state.flags[choice.onceKey] = true;
+  } else if (choice.once === true) {
+    // auto-generate a key if you didn't provide one
+    const key = `once_${this._lastNodeId}_${choice.label}`;
+    if (state.flags?.[key]) return;
+    state.flags ??= {};
+    state.flags[key] = true;
+  }
+
+  // ✅ CUSTOM HOOK: item spawns, secrets, unlocks, etc.
+  if (choice.onChoose && typeof choice.onChoose === "function") {
+  const handled = choice.onChoose(state, this);
+  if (handled === true) return; // ✅ onChoose fully handled (fx + nav later)
+}
+
 
   // stat check
   if (choice.check) {
@@ -2995,14 +3463,13 @@ enablePcGlitchOverlay() {
     state.flags.lastCheck = { ...choice.check, roll, total, pass };
 
     return this.transitionToNode(pass ? choice.onPass : choice.onFail);
-
   }
 
   if (choice.action) {
-  const handled = this.applyAction(choice);
-  // If the action fully handled UI/navigation, stop here.
-  if (handled === true) return;
-}
+    const handled = this.applyAction(choice);
+    // If the action fully handled UI/navigation, stop here.
+    if (handled === true) return;
+  }
 
   // ✅ If no navigation was specified, rerender once to reflect state changes
   if (!choice.go && !choice.goScene) {
@@ -3016,9 +3483,8 @@ enablePcGlitchOverlay() {
   }
 
   if (choice.go) {
-  return this.transitionToNode(choice.go);
-}
-
+    return this.transitionToNode(choice.go);
+  }
 }
 
   applyAction(choice) {
@@ -3052,6 +3518,42 @@ enablePcGlitchOverlay() {
   state.flags.pc_last = targetId;
 
   return true; // IMPORTANT: prevents choose() from calling renderNode()
+}
+
+case "takeDamage": {
+  const amt = Math.max(0, Number(data?.amount ?? 0));
+
+  state.hp = Math.max(0, (state.hp ?? 0) - amt);
+
+  if (amt > 0) {
+    try { this.playInjuryFX?.(amt); } catch {}
+  }
+
+  if (state.hp <= 0) {
+    state.flags = state.flags || {};
+
+    const raw = String(data?.cause || "unknown");
+
+    // ✅ small set of buckets for final_death to react to
+    const bucket =
+      raw.startsWith("mirror") ? "mirror" :
+      (raw === "fall" || raw.includes("fall")) ? "fall" :
+      (raw === "drowned" || raw === "water" || raw.includes("drown")) ? "water" :
+      (raw === "burned" || raw === "fire" || raw.includes("burn")) ? "fire" :
+      (raw === "gunshot" || raw === "knife" || raw === "violence" || raw.includes("shot") || raw.includes("stab"))
+        ? "violence" :
+      "unknown";
+
+    state.flags.final_death_source_node = state.nodeId;
+    state.flags.final_death_cause = bucket;   // broad bucket (what final_death switches on)
+    state.flags.final_death_detail = raw;     // optional (for flavor within bucket)
+    state.flags.final_death_damage = amt;
+
+    this.transitionToNode("final_death");
+    return true;
+  }
+
+  break;
 }
 
     case "travelDowntown":
@@ -3156,8 +3658,86 @@ case "setFlag":
   break;
 }
 
+case "touchMirror": {
+  state.flags = state.flags || {};
+  const v = state.flags.mirrorVariant ?? "normal";
+
+  // default (normal) touch = small sanity loss
+  let dmg = 0;
+  let sanityLoss = 1;
+
+  if (v === "wrong") {
+    dmg = 5;
+    sanityLoss = 0; // touching wrong hurts instead of sanity
+  } else if (v === "demon") {
+    dmg = 99;
+    sanityLoss = 0;
+  }
+
+  // apply sanity (only if > 0)
+  if (sanityLoss > 0) {
+    state.maxSanity = state.maxSanity ?? 10;
+    state.sanity = state.sanity ?? state.maxSanity;
+    state.sanity = clamp(state.sanity - sanityLoss, 0, state.maxSanity);
+  }
+
+  // apply damage (only if > 0)
+  if (dmg > 0) {
+    state.maxHp = state.maxHp ?? 10;
+    state.hp = state.hp ?? state.maxHp;
+
+    state.hp = clamp(state.hp - dmg, 0, state.maxHp);
+
+    // injury FX if still alive
+    this.playInjuryFX?.(dmg);
+
+    // death routing
+if (state.hp <= 0) {
+  const detail = (v === "demon") ? "demon_touch" : "wrong_touch";
+  this.finalDeath(state, { cause: "mirror", detail, damage: dmg });
+  return true;
+}
+  }
+
+  break;
+}
+
 case "stareMirror": {
   state.flags = state.flags || {};
+
+    // ✅ immediate effects depending on current variant
+  const currentVariant = state.flags.mirrorVariant ?? "normal";
+
+  // if WRONG is active, staring costs sanity (every time you choose it)
+  if (currentVariant === "wrong") {
+    state.maxSanity = state.maxSanity ?? 10;
+    state.sanity = state.sanity ?? state.maxSanity;
+    state.sanity = clamp(state.sanity - 1, 0, state.maxSanity); // <-- tweak amount if you want
+    break; // do not roll new wrong/demon while already wrong
+  }
+
+  // if DEMON is active, staring costs sanity + HP
+  if (currentVariant === "demon") {
+    state.maxSanity = state.maxSanity ?? 10;
+    state.sanity = state.sanity ?? state.maxSanity;
+    state.sanity = clamp(state.sanity - 2, 0, state.maxSanity); // <-- tweak amount if you want
+
+    // 5 damage
+    state.maxHp = state.maxHp ?? 10;
+    state.hp = state.hp ?? state.maxHp;
+    state.hp = clamp(state.hp - 5, 0, state.maxHp);
+
+    // play injury feedback if still alive
+    if (state.hp > 0) this.playInjuryFX?.(5);
+
+    // if killed by demon stare → final death
+    if (state.hp <= 0) {
+  this.finalDeath(state, { cause: "mirror", detail: "demon_stare", damage: 5 });
+  return true;
+}
+    break; // do not roll while demon is active
+  }
+
 
   const prevVariant = state.flags.mirrorVariant ?? "normal";
 
@@ -3251,10 +3831,6 @@ case "resetMirrorVisit": {
   if (data.newsBeat != null) state.newsBeat = data.newsBeat;
   break;
 
-    case "takeDamage":
-      state.hp = clamp(state.hp - (data.amount || 0), 0, state.maxHp);
-      break;
-
     case "gainXp":
       this.gainXp(state, data.amount || 0);
       break;
@@ -3312,7 +3888,158 @@ case "resetMirrorVisit": {
     }
   }
 
+
+
+  // ---------- DEV / DEBUG ----------
+  toggleDebugOverlay() {
+    if (!this.debug) this.debug = { enabled: false };
+    this.debug.enabled = !this.debug.enabled;
+
+    // lazy-create visuals
+    if (this.debug.enabled && !this.debug.text) {
+      const pad = 10;
+      this.debug.bg = this.add
+        .rectangle(0, 0, 420, 170, 0x000000, 0.6)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(40000);
+
+      this.debug.text = this.add
+        .text(pad, pad, "", {
+          fontFamily: "monospace",
+          fontSize: "14px",
+          color: "#eaeaea",
+        })
+        .setScrollFactor(0)
+        .setDepth(40001);
+    }
+
+    if (this.debug.bg) this.debug.bg.setVisible(this.debug.enabled);
+    if (this.debug.text) this.debug.text.setVisible(this.debug.enabled);
+
+    if (this.debug.enabled) this.refreshDebugOverlay(true);
+  }
+
+  refreshDebugOverlay(force = false) {
+    if (!this.debug?.enabled || !this.debug.text) return;
+    const now = this.time?.now ?? 0;
+    if (!force && now - (this.debug.lastRefresh ?? 0) < 250) return;
+    this.debug.lastRefresh = now;
+
+    const s = this.registry.get("state") || {};
+    const flags = s.flags || {};
+    const pcStolen = flags.pc_fake_stolen ?? flags.pc?.fake_stolen ?? 0;
+    const terrorLevel = this.pcTerror?.level ?? 0;
+    const terrorActive = !!this.pcTerror?.active;
+
+    const importantFlags = [];
+    const pick = (k) => {
+      if (flags?.[k]) importantFlags.push(k);
+    };
+    [
+      "first_death_seen",
+      "loop_awareness",
+      "pc_archive_found",
+      "failsafe_seen",
+      "day_forced_death",
+      "map_selected_once",
+      "map_selected_location",
+    ].forEach(pick);
+
+    const nodeId = s.nodeId || this._lastNodeId || "(unknown)";
+    const lines = [
+      `NODE: ${nodeId}`,
+      `HP: ${s.hp ?? "?"}/${s.maxHp ?? "?"}   SAN: ${s.sanity ?? "?"}/${s.maxSanity ?? "?"}   $: ${s.cash ?? "?"}`,
+      `Beat: ${s.beat ?? "?"}   Loc: ${s.locationId ?? "-"}`,
+      `PC: ${this.pcMode ? "ON" : "OFF"}   Terror: ${terrorLevel}${terrorActive ? "*" : ""}   Stolen: ${pcStolen}`,
+      `Flags: ${importantFlags.length ? importantFlags.join(", ") : "(none)"}`,
+      "F2: validate nodes   F3: toggle overlay",
+    ];
+
+    this.debug.text.setText(lines);
+
+    // auto-size bg to text
+    const b = this.debug.text.getBounds();
+    if (this.debug.bg) {
+      this.debug.bg.setSize(Math.max(420, b.width + 20), Math.max(170, b.height + 20));
+    }
+  }
+
+  runNodeValidator() {
+    try {
+      const errors = [];
+      const warns = [];
+
+      const nodeIds = new Set(Object.keys(NODES));
+      const tex = this.textures;
+
+      const checkTarget = (fromId, label, target) => {
+        if (!target) return;
+        if (!nodeIds.has(target)) errors.push(`[${fromId}] ${label} -> missing node '${target}'`);
+      };
+
+      for (const [id, node] of Object.entries(NODES)) {
+        // choices
+        (node.choices || []).forEach((c, i) => {
+          if (typeof c?.go === "string") checkTarget(id, `choice[${i}]`, c.go);
+        });
+
+        // check gates
+        if (node.check) {
+          checkTarget(id, "check.onPass", node.check.onPass);
+          checkTarget(id, "check.onFail", node.check.onFail);
+        }
+
+        // backgroundLayers texture keys (best-effort)
+        if (node.backgroundLayers && typeof node.backgroundLayers === "object") {
+          for (const [k, v] of Object.entries(node.backgroundLayers)) {
+            if (typeof v !== "string" || !v) continue;
+            if (v.startsWith("#")) continue;
+            if (!tex.exists(v)) warns.push(`[${id}] backgroundLayers.${k} references missing texture '${v}'`);
+          }
+        }
+
+        // PC nodes should declare UI
+        if (node.uiMode === "computer" && !node.computerUI) {
+          warns.push(`[${id}] uiMode:'computer' but no computerUI block`);
+        }
+      }
+
+      console.groupCollapsed("🧪 Node Validator Report");
+      console.log(`Nodes: ${nodeIds.size}`);
+
+      if (errors.length) {
+        console.group("❌ Errors");
+        errors.forEach((e) => console.error(e));
+        console.groupEnd();
+      } else {
+        console.log("✅ No missing-node errors found.");
+      }
+
+      if (warns.length) {
+        console.group("⚠️ Warnings");
+        warns.forEach((w) => console.warn(w));
+        console.groupEnd();
+      } else {
+        console.log("✅ No warnings found.");
+      }
+
+      console.groupEnd();
+
+      this.openPcToast?.("Node validation ran (check console).", {
+        title: "DEV",
+        variant: "info",
+        autoCloseMs: 1400,
+      });
+    } catch (e) {
+      console.error("Validator failed:", e);
+    }
+  }
+
   update(time, delta) {
+  // keep debug overlay fresh even when not in PC mode
+  if (this.debug?.enabled) this.refreshDebugOverlay(false);
+
   if (!this.pcMode || !this.pcUI?.cursor) return;
 
   // auto-release hijack if expired

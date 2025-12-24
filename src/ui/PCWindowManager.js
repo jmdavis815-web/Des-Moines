@@ -5,6 +5,11 @@
 // - Drag by title bar
 // - Close button
 // - Text content OR progress bar content
+// - Dialog/Error windows
+//
+// ✅ FIXED: drag listeners are now ONE global handler (no stacking per window)
+// ✅ Added: optional root hit-area to reduce click-through
+// ✅ Added: destroy() to unhook input listeners cleanly
 export default class PCWindowManager {
   constructor(scene, opts) {
     opts = opts || {};
@@ -28,6 +33,40 @@ export default class PCWindowManager {
         h: scene.scale.height - 160
       });
     }
+
+    // ----------------------------
+    // ✅ ONE global drag handler
+    // ----------------------------
+    this._drag = { active: false, win: null, ox: 0, oy: 0 };
+
+    this._onPointerUp = () => {
+      this._drag.active = false;
+      this._drag.win = null;
+    };
+
+    this._onPointerMove = (p) => {
+      if (!this.scene || !this.scene.sys || !this.scene.sys.isActive()) return;
+      if (!this._drag.active || !this._drag.win) return;
+
+      const win = this._drag.win;
+      win.root.x = p.x - this._drag.ox;
+      win.root.y = p.y - this._drag.oy;
+      this._clampToBounds(win);
+    };
+
+    // Hook once
+    scene.input.on("pointerup", this._onPointerUp);
+    scene.input.on("pointermove", this._onPointerMove);
+  }
+
+  destroy() {
+    // unhook global listeners
+    try {
+      this.scene.input.off("pointerup", this._onPointerUp);
+      this.scene.input.off("pointermove", this._onPointerMove);
+    } catch (e) {}
+
+    this.destroyAll();
   }
 
   destroyAll() {
@@ -50,18 +89,18 @@ export default class PCWindowManager {
   }
 
   createDialogWindow(cfg) {
-  cfg = cfg || {};
-  cfg.contentType = "dialog";
-  return this.createWindow(cfg);
-}
+    cfg = cfg || {};
+    cfg.contentType = "dialog";
+    return this.createWindow(cfg);
+  }
 
-createErrorWindow(cfg) {
-  cfg = cfg || {};
-  cfg.contentType = "dialog";
-  cfg.variant = cfg.variant || "error"; // error | warn | info
-  cfg.title = cfg.title || "ERROR";
-  return this.createWindow(cfg);
-}
+  createErrorWindow(cfg) {
+    cfg = cfg || {};
+    cfg.contentType = "dialog";
+    cfg.variant = cfg.variant || "error"; // error | warn | info
+    cfg.title = cfg.title || "ERROR";
+    return this.createWindow(cfg);
+  }
 
   createWindow(cfg) {
     cfg = cfg || {};
@@ -96,6 +135,10 @@ createErrorWindow(cfg) {
     // --- container root ---
     const root = scene.add.container(x, y);
     root.setDepth(this._allocDepth());
+
+    // ✅ optional: give container a hit area (helps prevent click-through)
+    root.setSize(w, h);
+    root.setInteractive(new Phaser.Geom.Rectangle(0, 0, w, h), Phaser.Geom.Rectangle.Contains);
 
     // --- background ---
     const bg = scene.add.rectangle(0, 0, w, h, 0x0b0f14, 0.92)
@@ -136,123 +179,123 @@ createErrorWindow(cfg) {
     content.add(contentBg);
 
     // text content
-let textObj = null;
+    let textObj = null;
 
-// progress content
-let progress = null;
+    // progress content
+    let progress = null;
 
-// dialog content
-let dialog = null;
+    // dialog content
+    let dialog = null;
 
-if (cfg.contentType === "text") {
-  const text = Array.isArray(cfg.lines) ? cfg.lines.join("\n") : (cfg.text || "");
-  textObj = scene.add.text(12, 10, text, {
-    fontFamily: "monospace",
-    fontSize: "16px",
-    color: "#e6f0ff",
-    lineSpacing: 6,
-    wordWrap: { width: contentW - 24 }
-  });
-  content.add(textObj);
-}
+    if (cfg.contentType === "text") {
+      const text = Array.isArray(cfg.lines) ? cfg.lines.join("\n") : (cfg.text || "");
+      textObj = scene.add.text(12, 10, text, {
+        fontFamily: "monospace",
+        fontSize: "16px",
+        color: "#e6f0ff",
+        lineSpacing: 6,
+        wordWrap: { width: contentW - 24 }
+      });
+      content.add(textObj);
+    }
 
-if (cfg.contentType === "progress") {
-  const labelText = (cfg.label !== undefined) ? cfg.label : "Working...";
+    if (cfg.contentType === "progress") {
+      const labelText = (cfg.label !== undefined) ? cfg.label : "Working...";
 
-  const label = scene.add.text(12, 10, labelText, {
-    fontFamily: "monospace",
-    fontSize: "16px",
-    color: "#e6f0ff"
-  });
+      const label = scene.add.text(12, 10, labelText, {
+        fontFamily: "monospace",
+        fontSize: "16px",
+        color: "#e6f0ff"
+      });
 
-  const barY = 52;
-  const barBg = scene.add.rectangle(12, barY, contentW - 24, 18, 0x0f1a24, 1)
-    .setOrigin(0, 0)
-    .setStrokeStyle(1, 0x2a3b52, 1);
+      const barY = 52;
+      const barBg = scene.add.rectangle(12, barY, contentW - 24, 18, 0x0f1a24, 1)
+        .setOrigin(0, 0)
+        .setStrokeStyle(1, 0x2a3b52, 1);
 
-  const barFill = scene.add.rectangle(12, barY, 0, 18, 0x8fb4ff, 1)
-    .setOrigin(0, 0);
+      const barFill = scene.add.rectangle(12, barY, 0, 18, 0x8fb4ff, 1)
+        .setOrigin(0, 0);
 
-  const pct = scene.add.text(12, 80, "0%", {
-    fontFamily: "monospace",
-    fontSize: "14px",
-    color: "#cfe1ff"
-  });
+      const pct = scene.add.text(12, 80, "0%", {
+        fontFamily: "monospace",
+        fontSize: "14px",
+        color: "#cfe1ff"
+      });
 
-  progress = { label, barBg, barFill, pct, value: 0, w: (contentW - 24) };
-  content.add([label, barBg, barFill, pct]);
-}
+      progress = { label, barBg, barFill, pct, value: 0, w: (contentW - 24) };
+      content.add([label, barBg, barFill, pct]);
+    }
 
-if (cfg.contentType === "dialog") {
-  const variant = cfg.variant || "error"; // error | warn | info
-  const msg = Array.isArray(cfg.message) ? cfg.message.join("\n") : (cfg.message || cfg.text || "");
+    if (cfg.contentType === "dialog") {
+      const variant = cfg.variant || "error"; // error | warn | info
+      const msg = Array.isArray(cfg.message) ? cfg.message.join("\n") : (cfg.message || cfg.text || "");
 
-  // icon block color
-  const iconColor =
-    variant === "warn" ? 0xffcc66 :
-    variant === "info" ? 0x8fb4ff :
-    0xff6677;
+      // icon block color
+      const iconColor =
+        variant === "warn" ? 0xffcc66 :
+        variant === "info" ? 0x8fb4ff :
+        0xff6677;
 
-  const iconBox = scene.add.rectangle(12, 12, 42, 42, iconColor, 0.18)
-    .setOrigin(0, 0)
-    .setStrokeStyle(1, iconColor, 0.65);
+      const iconBox = scene.add.rectangle(12, 12, 42, 42, iconColor, 0.18)
+        .setOrigin(0, 0)
+        .setStrokeStyle(1, iconColor, 0.65);
 
-  const iconText = scene.add.text(26, 18,
-    variant === "warn" ? "!" : variant === "info" ? "i" : "X",
-    { fontFamily: "monospace", fontSize: "28px", color: "#e6f0ff" }
-  );
+      const iconText = scene.add.text(26, 18,
+        variant === "warn" ? "!" : variant === "info" ? "i" : "X",
+        { fontFamily: "monospace", fontSize: "28px", color: "#e6f0ff" }
+      );
 
-  const body = scene.add.text(66, 12, msg, {
-    fontFamily: "monospace",
-    fontSize: "16px",
-    color: "#e6f0ff",
-    lineSpacing: 6,
-    wordWrap: { width: contentW - 78 }
-  });
+      const body = scene.add.text(66, 12, msg, {
+        fontFamily: "monospace",
+        fontSize: "16px",
+        color: "#e6f0ff",
+        lineSpacing: 6,
+        wordWrap: { width: contentW - 78 }
+      });
 
-  // buttons
-  const buttons = Array.isArray(cfg.buttons) ? cfg.buttons : [{ label: "OK", action: "close" }];
-  const btnY = contentH - 52;
-  const btnPad = 12;
-  const btnW = 120;
-  const btnH = 34;
+      // buttons
+      const buttons = Array.isArray(cfg.buttons) ? cfg.buttons : [{ label: "OK", action: "close" }];
+      const btnY = contentH - 52;
+      const btnPad = 12;
+      const btnW = 120;
+      const btnH = 34;
 
-  const btnObjs = [];
+      const btnObjs = [];
 
-  // Right-align buttons like a real OS
-  let totalW = buttons.length * btnW + (buttons.length - 1) * 12;
-  let startX = contentW - totalW - btnPad;
+      // Right-align buttons like a real OS
+      let totalW = buttons.length * btnW + (buttons.length - 1) * 12;
+      let startX = contentW - totalW - btnPad;
 
-  buttons.forEach((b, i) => {
-    const bx = startX + i * (btnW + 12);
+      buttons.forEach((b, i) => {
+        const bx = startX + i * (btnW + 12);
 
-    const r = scene.add.rectangle(bx, btnY, btnW, btnH, 0x101a24, 0.98)
-      .setOrigin(0, 0)
-      .setStrokeStyle(1, 0x2a3b52, 1)
-      .setInteractive();
+        const r = scene.add.rectangle(bx, btnY, btnW, btnH, 0x101a24, 0.98)
+          .setOrigin(0, 0)
+          .setStrokeStyle(1, 0x2a3b52, 1)
+          .setInteractive();
 
-    const t = scene.add.text(bx + 18, btnY + 7, b.label || "OK", {
-      fontFamily: "monospace",
-      fontSize: "16px",
-      color: "#dfe7ff"
-    });
+        const t = scene.add.text(bx + 18, btnY + 7, b.label || "OK", {
+          fontFamily: "monospace",
+          fontSize: "16px",
+          color: "#dfe7ff"
+        });
 
-    r.on("pointerdown", () => {
-      if (typeof b.onClick === "function") {
-        try { b.onClick(); } catch (e) { console.warn("dialog onClick error:", e); }
-      }
-      if (b.action === "close" || b.action == null) {
-        this.closeWindow(id);
-      }
-    });
+        r.on("pointerdown", () => {
+          if (typeof b.onClick === "function") {
+            try { b.onClick(); } catch (e) { console.warn("dialog onClick error:", e); }
+          }
+          if (b.action === "close" || b.action == null) {
+            this.closeWindow(id);
+          }
+        });
 
-    btnObjs.push(r, t);
-  });
+        btnObjs.push(r, t);
+      });
 
-  content.add([iconBox, iconText, body, ...btnObjs]);
+      content.add([iconBox, iconText, body, ...btnObjs]);
 
-  dialog = { variant, body, buttons: btnObjs, iconBox, iconText };
-}
+      dialog = { variant, body, buttons: btnObjs, iconBox, iconText };
+    }
 
     // Build structure
     root.add([bg, titleBar, titleText, closeBtn, content]);
@@ -289,7 +332,7 @@ if (cfg.contentType === "dialog") {
     bg.on("pointerdown", () => this.focusWindow(id));
     titleBar.on("pointerdown", () => this.focusWindow(id));
 
-    // drag by titlebar
+    // drag by titlebar (✅ uses single global handlers)
     this._enableDrag(win);
 
     // clamp inside bounds (initial)
@@ -313,6 +356,12 @@ if (cfg.contentType === "dialog") {
 
     // callback before destroy
     try { if (win.onClose) win.onClose(win); } catch (e) { console.warn("win onClose error:", e); }
+
+    // if this window is being dragged, release it
+    if (this._drag && this._drag.win && this._drag.win.id === id) {
+      this._drag.active = false;
+      this._drag.win = null;
+    }
 
     // destroy
     try { win.root.destroy(true); } catch (e) {}
@@ -370,27 +419,13 @@ if (cfg.contentType === "dialog") {
   }
 
   _enableDrag(win) {
-    const scene = this.scene;
-    const dragState = { dragging: false, ox: 0, oy: 0 };
-
+    // ✅ start drag ONLY; actual movement handled by global pointermove
     win.titleBar.on("pointerdown", (p) => {
-      dragState.dragging = true;
-      dragState.ox = p.x - win.root.x;
-      dragState.oy = p.y - win.root.y;
-    });
-
-    // stop drag when pointer up anywhere
-    scene.input.on("pointerup", () => { dragState.dragging = false; });
-
-    // move
-    scene.input.on("pointermove", (p) => {
-      if (!scene || !scene.sys || !scene.sys.isActive()) return;
-      if (!dragState.dragging) return;
-
-      win.root.x = p.x - dragState.ox;
-      win.root.y = p.y - dragState.oy;
-
-      this._clampToBounds(win);
+      this.focusWindow(win.id);
+      this._drag.active = true;
+      this._drag.win = win;
+      this._drag.ox = p.x - win.root.x;
+      this._drag.oy = p.y - win.root.y;
     });
   }
 

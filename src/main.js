@@ -1,13 +1,16 @@
-import BootScene from "./scenes/BootScene.js";
-import MenuScene from "./scenes/MenuScene.js";
-import UIScene from "./scenes/UIScene.js";
-import StoryScene from "./scenes/StoryScene.js";
-import MapScene from "./scenes/MapScene.js";
-import InventoryScene from "./scenes/InventoryScene.js";
-import ShopScene from "./scenes/ShopScene.js";
-import PauseMenuScene from "./scenes/PauseMenuScene.js";
-import CharacterScene from "./scenes/CharacterScene.js";
-import EquipmentScene from "./scenes/EquipmentScene.js";
+// NOTE: This project serves files directly from the same folder as index.html.
+// So scenes live alongside main.js (not in a /scenes subfolder).
+import BootScene from "../src/scenes/BootScene.js";
+import MenuScene from "../src/scenes/MenuScene.js";
+import UIScene from "../src/scenes/UIScene.js";
+import StoryScene from "../src/scenes/StoryScene.js";
+import MapScene from "../src/scenes/MapScene.js";
+import InventoryScene from "../src/scenes/InventoryScene.js";
+import ShopScene from "../src/scenes/ShopScene.js";
+import PauseMenuScene from "../src/scenes/PauseMenuScene.js";
+import CharacterScene from "../src/scenes/CharacterScene.js";
+import EquipmentScene from "../src/scenes/EquipmentScene.js";
+import PreloadScene from "../src/scenes/PreloadScene.js";
 
 const config = {
   type: Phaser.AUTO,
@@ -27,6 +30,7 @@ const config = {
 
   scene: [
     BootScene,
+    PreloadScene,
     MenuScene,
     UIScene,
     StoryScene,

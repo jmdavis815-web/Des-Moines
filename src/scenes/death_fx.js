@@ -109,78 +109,39 @@ export function playDeathFX(scene, opts = {}) {
     });
   }
 
-  // --- 5) Cracked screen (procedural) (NEW)
-  let cracks = null;
+  // --- 5) Cracked screen (image pack)
+let cracks = null;
 
-  const rollCrack = crackChance > 0 && Math.random() < crackChance;
+const rollCrack = crackChance > 0 && Math.random() < crackChance;
 
-  if (rollCrack) {
-    cracks = scene.add.graphics();
+if (rollCrack) {
+  // Pick severity based on your existing opts (crackAlpha/crackCount/etc),
+  // or just randomize. Here’s a simple mapping:
+  let crackKey = "crack_light";
+  if (crackAlpha >= 0.32) crackKey = "crack_extreme";
+  else if (crackAlpha >= 0.26) crackKey = "crack_heavy";
+  else if (crackAlpha >= 0.18) crackKey = "crack_medium";
+
+  if (scene.textures.exists(crackKey)) {
+    cracks = scene.add.image(cam.midPoint.x, cam.midPoint.y, crackKey);
     cracks.setScrollFactor(0);
     cracks.setDepth(10005);
     cracks.setAlpha(0);
 
-    const w = cam.width;
-    const h = cam.height;
+    // Make it fill the screen
+    cracks.setDisplaySize(cam.width, cam.height);
 
-    const hitX = impactX != null ? impactX * w : Phaser.Math.Between(w * 0.25, w * 0.75);
-    const hitY = impactY != null ? impactY * h : Phaser.Math.Between(h * 0.20, h * 0.60);
-
-    // glass crack lines: pale, slightly blue-ish white
-    // (still reads as glass without screaming “white lines”)
-    cracks.lineStyle(crackThickness, 0xeaf2ff, 0.55);
-
-    // draw main rays
-    for (let i = 0; i < crackCount; i++) {
-      const ang = (Math.PI * 2 * i) / crackCount + Phaser.Math.FloatBetween(-0.35, 0.35);
-      const len = Phaser.Math.Between(Math.min(w, h) * 0.25, Math.min(w, h) * 0.58);
-
-      let x = hitX;
-      let y = hitY;
-
-      cracks.beginPath();
-      cracks.moveTo(x, y);
-
-      // jagged segments
-      const segs = Phaser.Math.Between(6, 10);
-      for (let s = 1; s <= segs; s++) {
-        const t = s / segs;
-        const jitter = Phaser.Math.FloatBetween(-10, 10) * (1 - t);
-        const nx = hitX + Math.cos(ang) * (len * t) + jitter;
-        const ny = hitY + Math.sin(ang) * (len * t) + Phaser.Math.FloatBetween(-10, 10) * (1 - t);
-        cracks.lineTo(nx, ny);
-        x = nx;
-        y = ny;
-
-        // occasional branching
-        if (Math.random() < 0.18 && s > 2) {
-          const bang = ang + Phaser.Math.FloatBetween(-0.7, 0.7);
-          const blen = Phaser.Math.Between(40, 120);
-
-          cracks.beginPath();
-          cracks.moveTo(x, y);
-          cracks.lineTo(
-            x + Math.cos(bang) * blen + Phaser.Math.FloatBetween(-8, 8),
-            y + Math.sin(bang) * blen + Phaser.Math.FloatBetween(-8, 8)
-          );
-          cracks.strokePath();
-        }
-      }
-
-      cracks.strokePath();
-    }
-
-    // a faint “impact star” at the hit point
-    cracks.lineStyle(crackThickness + 1, 0xf8fbff, 0.45);
-    cracks.strokeCircle(hitX, hitY, Phaser.Math.Between(10, 18));
+    // Optional slight rotation / variation
+    cracks.setRotation(Phaser.Math.FloatBetween(-0.03, 0.03));
 
     scene.tweens.add({
       targets: cracks,
       alpha: crackAlpha,
-      duration: 90,
+      duration: 120,
       ease: "Sine.easeOut",
     });
   }
+}
 
   // Return handles so you can remove later
   const fx = {
